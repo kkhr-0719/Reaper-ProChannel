@@ -145,3 +145,14 @@ ReaperProChannel/
 ### `v0.3.0` — Strip 预设管理与打磨
 - 0 号位 Channel Strip 预设的一键保存与加载（复用 REAPER 原生 `.RfxChain` 或容器预设机制，方便一键套用鼓组/钢琴/贝斯常用模拟条）。
 - 完善 `ExtState` 配置持久化、空态引导、边缘异常容错与完整 `README.md` 文档。
+
+### `v0.4.0+` — 远期单轨 Inspector 混音扩展规划（优先级排在双区 FX 核心路线之后）
+在双区 FX 核心体验与预设体系稳定后，逐步演进为完整的左侧单轨 Channel Inspector（设计备忘）：
+1. **单轨混音核心组件（高优先级远期项）**：
+   - **顶部录音与高频通道开关**：录音预备（`R` / Record Arm）、监听模式（`Mon`）、静音（`M`）、独奏（`S`）、反相（`Ø` / Phase Invert）。
+   - **发送槽列表（`Sends`）**：展示当前轨道的硬件/轨道发送列表，支持快速调节发送量、静音与点击跳转目标轨道。
+   - **底部声像/立体声宽度与推子区**：`Pan / Width`（UI 精修阶段优先采用经典圆弧旋钮 `ImDrawList` 绘制，而非普通水平拉条）+ 通道音量推子（Fader）+ 可选实时 L/R 峰值/RMS 电平表。
+2. **底部 `In / MIDI / Out` 路由摘要（中低优先级远期项）**：
+   - 不在窄侧边栏内重造复杂的 REAPER 原生路由矩阵；仅做**轻量两行文字状态摘要展示**（如当前输入源 Input / MIDI 通道与 Master/Parent Send 状态）+ **点击直接呼出 REAPER 原生 I/O 路由窗口**。
+3. **顶部 Pre-FX Gain 输入增益旋钮（低优先级 Opt-in 可选项）**：
+   - 不强制默认内置或常驻占用 FX 槽位；作为设置中的低优先级可选方案（Opt-in），仅在用户显式开启该轨 Pre-FX Gain 时，按需调用 REAPER 原厂自带的 `JS: Volume Adjustment` 并联动其 `Adjustment (dB)` 参数。

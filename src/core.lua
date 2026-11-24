@@ -5,7 +5,7 @@
 
 local core = {}
 
-core.VERSION = "0.1.0"
+core.VERSION = "0.2.0"
 core.STRIP_DEFAULT_NAME = "◆ CHANNEL STRIP ◆"
 core.EXT_SECTION = "REAPCH"
 core.LEGACY_EXT_SECTION = "RPROCH"
@@ -14,10 +14,12 @@ core.LEGACY_TRACK_EXT_KEY = "P_EXT:RPROCH_STRIP_GUID"
 core.CONTAINER_BASE = 0x2000000
 
 core._reaper = nil
+core._installed_fx_cache = nil
 
---- 注入自定义或 Mock 的 reaper API 表（传入 nil 则回退至全局 _G.reaper）
+--- 注入自定义或 Mock 的 reaper API 表（传入 nil 则回退至全局 _G.reaper，并重置已安装插件缓存）
 function core.set_reaper(r)
   core._reaper = r
+  core._installed_fx_cache = nil
 end
 
 --- 获取当前生效的 reaper API 表
@@ -128,6 +130,120 @@ function core.decode_container_item_index(encoded_idx, parent_fx_count)
   return container_idx_1based - 1, child_pos_1based - 1
 end
 
+local function is_valid_fx_id(r, tr, fx_id)
+  if not tr or not is_integer(fx_id) or fx_id < 0 then
+    return false
+  end
+  local total = r.TrackFX_GetCount(tr) or 0
+  if fx_id < core.CONTAINER_BASE then
+    return fx_id < total
+  end
+  local c_idx, child_pos = core.decode_container_item_index(fx_id, total)
+  if c_idx == nil or c_idx >= total or child_pos == nil or child_pos < 0 then
+    return false
+  end
+  local ok, cnt_str = r.TrackFX_GetNamedConfigParm(tr, c_idx, "container_count")
+  local cnt = (ok and tonumber(cnt_str)) or 0
+  return child_pos < cnt
+end
+
+--- 获取指定 FX（含顶层常规插件与 0x2000000+ 容器子插件）的 REAPER 原生 Wet 参数索引
+function core.get_fx_wet_param_index(tr, fx_id)
+  local r = core.get_reaper()
+  if not is_valid_fx_id(r, tr, fx_id) then
+    return nil
+  end
+  if type(r.TrackFX_GetParamFromIdent) == "function" then
+    local idx = r.TrackFX_GetParamFromIdent(tr, fx_id, ":wet")
+    if is_integer(idx) and idx >= 0 then
+      return idx
+    end
+  end
+  if type(r.TrackFX_GetNumParams) == "function" and type(r.TrackFX_GetParamName) == "function" then
+    local num = r.TrackFX_GetNumParams(tr, fx_id) or 0
+    for i = num - 1, 0, -1 do
+      local ok, pname = r.TrackFX_GetParamName(tr, fx_id, i, "")
+      if ok and pname == "Wet" then
+        return i
+      end
+    end
+  end
+  return nil
+end
+
+--- 读取指定 FX 的 Wet/Dry 干湿比（归一化为 0.0 .. 1.0）
+--- @return boolean ok, number wet_0_to_1
+function core.get_fx_wet(tr, fx_id)
+  local r = core.get_reaper()
+  if not is_valid_fx_id(r, tr, fx_id) then
+    return false, 1.0
+  end
+  local param_idx = core.get_fx_wet_param_index(tr, fx_id)
+  if param_idx == nil then
+    return false, 1.0
+  end
+  local val = nil
+  local minval, maxval = 0.0, 1.0
+  if type(r.TrackFX_GetParam) == "function" then
+    val, minval, maxval = r.TrackFX_GetParam(tr, fx_id, param_idx)
+  elseif type(r.TrackFX_GetParamNormalized) == "function" then
+    val = r.TrackFX_GetParamNormalized(tr, fx_id, param_idx)
+  end
+  if type(val) ~= "number" or val ~= val then
+    return false, 1.0
+  end
+  if type(minval) == "number" and type(maxval) == "number" and maxval > minval then
+    val = (val - minval) / (maxval - minval)
+  end
+  if val < 0.0 then
+    val = 0.0
+  elseif val > 1.0 then
+    val = 1.0
+  end
+  return true, val
+end
+
+--- 设置指定 FX 的 Wet/Dry 干湿比（输入范围 0.0 .. 1.0，超出范围自动夹紧）
+--- @param tr any MediaTrack
+--- @param fx_id number 顶层索引或 0x2000000+ 容器子项编码
+--- @param wet_0_to_1 number 目标干湿比 (0.0 .. 1.0)
+--- @param record_undo boolean|nil 是否记录 Undo（默认 true；UI 连续拖拽过程中可传 false，松手时传 true）
+--- @return boolean ok, number|nil applied_wet
+function core.set_fx_wet(tr, fx_id, wet_0_to_1, record_undo)
+  local r = core.get_reaper()
+  if not is_valid_fx_id(r, tr, fx_id) or type(wet_0_to_1) ~= "number" then
+    return false, nil
+  end
+  -- 防御 NaN
+  if wet_0_to_1 ~= wet_0_to_1 then
+    return false, nil
+  end
+  local param_idx = core.get_fx_wet_param_index(tr, fx_id)
+  if param_idx == nil then
+    return false, nil
+  end
+  local clamped = math.max(0.0, math.min(1.0, wet_0_to_1))
+  local use_undo = (record_undo ~= false)
+  if use_undo then
+    begin_undo(r)
+  end
+  local ok = false
+  if type(r.TrackFX_SetParam) == "function" then
+    local ret = r.TrackFX_SetParam(tr, fx_id, param_idx, clamped)
+    ok = (ret ~= false)
+  elseif type(r.TrackFX_SetParamNormalized) == "function" then
+    local ret = r.TrackFX_SetParamNormalized(tr, fx_id, param_idx, clamped)
+    ok = (ret ~= false)
+  end
+  if use_undo then
+    end_undo(r, "ReaPCh: Adjust FX Wet/Dry")
+  end
+  if not ok then
+    return false, nil
+  end
+  return true, clamped
+end
+
 --------------------------------------------------------------------------------
 -- 3. 0 号位容器“GUID 认亲”与初始化
 --------------------------------------------------------------------------------
@@ -230,6 +346,8 @@ function core.get_strip_children(tr, container_idx)
     if r.TrackFX_GetOpen then
       is_open = r.TrackFX_GetOpen(tr, fx_id) and true or false
     end
+    local _, wet_val = core.get_fx_wet(tr, fx_id)
+    local wet_num = (type(wet_val) == "number") and wet_val or 1.0
     children[#children + 1] = {
       slot = i + 1,
       child_index = i,
@@ -238,6 +356,8 @@ function core.get_strip_children(tr, container_idx)
       enabled = (enabled ~= false),
       guid = guid or "",
       is_open = is_open,
+      wet = wet_num,
+      wet_percent = math.floor(wet_num * 100 + 0.5),
     }
   end
   return children
@@ -427,6 +547,8 @@ function core.get_normal_fx_list(tr, strip_idx_override)
       if r.TrackFX_GetOpen then
         is_open = r.TrackFX_GetOpen(tr, i) and true or false
       end
+      local _, wet_val = core.get_fx_wet(tr, i)
+      local wet_num = (type(wet_val) == "number") and wet_val or 1.0
       normal_fx[visual_slot] = {
         visual_slot = visual_slot,
         top_index = i,
@@ -435,6 +557,8 @@ function core.get_normal_fx_list(tr, strip_idx_override)
         enabled = (enabled ~= false),
         guid = guid or "",
         is_open = is_open,
+        wet = wet_num,
+        wet_percent = math.floor(wet_num * 100 + 0.5),
       }
     end
   end
@@ -603,23 +727,6 @@ function core.set_strip_enabled(tr, enabled)
   return true, target
 end
 
-local function is_valid_fx_id(r, tr, fx_id)
-  if not tr or not is_integer(fx_id) or fx_id < 0 then
-    return false
-  end
-  local total = r.TrackFX_GetCount(tr) or 0
-  if fx_id < core.CONTAINER_BASE then
-    return fx_id < total
-  end
-  local c_idx, child_pos = core.decode_container_item_index(fx_id, total)
-  if c_idx == nil or c_idx >= total or child_pos == nil or child_pos < 0 then
-    return false
-  end
-  local ok, cnt_str = r.TrackFX_GetNamedConfigParm(tr, c_idx, "container_count")
-  local cnt = (ok and tonumber(cnt_str)) or 0
-  return child_pos < cnt
-end
-
 --- 切换或设置单个插件（容器子项或顶层常规插件）启用状态
 function core.set_fx_enabled(tr, fx_id, enabled)
   local r = core.get_reaper()
@@ -656,7 +763,98 @@ function core.toggle_fx_floating_window(tr, fx_id)
 end
 
 --------------------------------------------------------------------------------
--- 6. 双区视图模型生成（供 ui.lua 与单元测试消费）
+-- 6. 已安装插件枚举缓存与关键词搜索过滤（基于 reaper.EnumInstalledFX）
+--------------------------------------------------------------------------------
+
+--- 清空已安装插件内存缓存
+function core.clear_installed_fx_cache()
+  core._installed_fx_cache = nil
+end
+
+--- 枚举并缓存宿主已安装的 FX 列表（自动过滤空项与裸 Container 容器本体）
+--- @param force_refresh boolean|nil 是否强制重新扫描
+--- @return table installed_fx_list
+function core.get_installed_fx(force_refresh)
+  if not force_refresh and type(core._installed_fx_cache) == "table" then
+    return core._installed_fx_cache
+  end
+
+  local r = core.get_reaper()
+  local list = {}
+  if type(r.EnumInstalledFX) == "function" then
+    local idx = 0
+    local max_scan = 50000
+    while idx < max_scan do
+      local ok, name, ident = r.EnumInstalledFX(idx)
+      if not ok then
+        break
+      end
+      local clean_name = (type(name) == "string") and name or ""
+      local clean_ident = (type(ident) == "string") and ident or ""
+      if (clean_name ~= "" or clean_ident ~= "")
+        and clean_name ~= "Container"
+        and clean_ident ~= "Container" then
+        local display_name = (clean_name ~= "" and clean_name) or clean_ident
+        local add_name = (clean_name ~= "" and clean_name) or clean_ident
+        local fmt = display_name:match("^([%w_]+):%s+") or ""
+        local search_text = (clean_name .. " " .. clean_ident):lower()
+        list[#list + 1] = {
+          index = idx,
+          name = display_name,
+          ident = clean_ident,
+          add_name = add_name,
+          format = fmt,
+          _search_text = search_text,
+        }
+      end
+      idx = idx + 1
+    end
+  end
+
+  core._installed_fx_cache = list
+  return list
+end
+
+--- 按关键词即时搜索过滤已安装插件（支持空格分词多关键词与特殊字符纯文本子串匹配）
+--- @param query string|nil 搜索关键词（空格分隔多词需同时命中）
+--- @param max_results number|nil 可选返回上限（省略或 <=0 则返回全部命中项）
+--- @param force_refresh boolean|nil 是否在过滤前强制刷新已安装插件缓存
+--- @return table results, number total_matched
+function core.filter_installed_fx(query, max_results, force_refresh)
+  local all_fx = core.get_installed_fx(force_refresh)
+  local tokens = {}
+  if type(query) == "string" and query ~= "" then
+    for tok in query:lower():gmatch("%S+") do
+      tokens[#tokens + 1] = tok
+    end
+  end
+
+  local limit = (is_integer(max_results) and max_results > 0) and max_results or nil
+  local results = {}
+  local total_matched = 0
+
+  for i = 1, #all_fx do
+    local item = all_fx[i]
+    local matched = true
+    for t = 1, #tokens do
+      if not string.find(item._search_text, tokens[t], 1, true) then
+        matched = false
+        break
+      end
+    end
+    if matched then
+      total_matched = total_matched + 1
+      if not limit or #results < limit then
+        results[#results + 1] = item
+      end
+    end
+  end
+
+  return results, total_matched
+end
+
+--------------------------------------------------------------------------------
+-- 7. 双区视图模型生成（供 ui.lua 与单元测试消费）
 --------------------------------------------------------------------------------
 
 local function get_track_display_name(r, tr)

@@ -12,6 +12,7 @@ local function deep_copy_fx(node, next_guid_fn)
     renamed_name = node.renamed_name,
     enabled = node.enabled,
     open = node.open,
+    wet = (type(node.wet) == "number") and node.wet or 1.0,
     is_container = node.is_container,
     children = {},
   }
@@ -32,6 +33,16 @@ function mock_reaper.new()
     ext_state = {},
     undo_history = {},
     in_undo_block = false,
+    installed_fx = {
+      { name = "Container", ident = "Container" },
+      { name = "VST3: ReaEQ (Cockos)", ident = "reaeq.vst3" },
+      { name = "VST3: ReaComp (Cockos)", ident = "reacomp.vst3" },
+      { name = "VST3: Pro-Q 3 (FabFilter)", ident = "FabFilter Pro-Q 3.vst3" },
+      { name = "VST: SSL G-Master Buss Compressor (Waves)", ident = "SSLComp.dll" },
+      { name = "CLAP: Surge XT (Surge Synth Team)", ident = "org.surge-synth-team.surge-xt" },
+      { name = "JS: Volume Adjustment", ident = "utility/volume" },
+      { name = "JS: 1175 Compressor [Stillwell]", ident = "stillwell/1175" },
+    },
   }
 
   local api = {}
@@ -94,9 +105,24 @@ function mock_reaper.new()
     bump_state()
   end
 
+  function api.mock_set_installed_fx(list)
+    state.installed_fx = list or {}
+  end
+
   ----------------------------------------------------------------------------
   -- REAPER 标准 API 模拟
   ----------------------------------------------------------------------------
+
+  function api.EnumInstalledFX(index)
+    if type(index) ~= "number" or index < 0 or math.floor(index) ~= index then
+      return false, "", ""
+    end
+    local entry = state.installed_fx[index + 1]
+    if not entry then
+      return false, "", ""
+    end
+    return true, tostring(entry.name or ""), tostring(entry.ident or "")
+  end
 
   function api.GetProjectStateChangeCount(_proj)
     return state.state_change_count
@@ -167,6 +193,7 @@ function mock_reaper.new()
       renamed_name = nil,
       enabled = true,
       open = false,
+      wet = 1.0,
       is_container = (fxname == "Container"),
       children = {},
     }
@@ -235,6 +262,63 @@ function mock_reaper.new()
       node.open = false
     end
     bump_state()
+  end
+
+  function api.TrackFX_GetParamFromIdent(tr, fx_idx, ident_str)
+    local node = resolve_fx(tr, fx_idx)
+    if not node or type(ident_str) ~= "string" then
+      return -1
+    end
+    if ident_str == ":wet" then
+      return 0
+    elseif ident_str == ":bypass" then
+      return 1
+    elseif ident_str == ":delta" then
+      return 2
+    end
+    return -1
+  end
+
+  function api.TrackFX_GetNumParams(tr, fx_idx)
+    local node = resolve_fx(tr, fx_idx)
+    if not node then
+      return 0
+    end
+    return 3
+  end
+
+  function api.TrackFX_GetParamName(tr, fx_idx, param_idx, _buf)
+    local node = resolve_fx(tr, fx_idx)
+    if not node or type(param_idx) ~= "number" then
+      return false, ""
+    end
+    if param_idx == 0 then
+      return true, "Wet"
+    elseif param_idx == 1 then
+      return true, "Bypass"
+    elseif param_idx == 2 then
+      return true, "Delta"
+    end
+    return false, ""
+  end
+
+  function api.TrackFX_GetParam(tr, fx_idx, param_idx)
+    local node = resolve_fx(tr, fx_idx)
+    if not node or param_idx ~= 0 then
+      return -1, 0.0, 1.0
+    end
+    local w = (type(node.wet) == "number") and node.wet or 1.0
+    return w, 0.0, 1.0
+  end
+
+  function api.TrackFX_SetParam(tr, fx_idx, param_idx, val)
+    local node = resolve_fx(tr, fx_idx)
+    if not node or param_idx ~= 0 or type(val) ~= "number" then
+      return false
+    end
+    node.wet = math.max(0.0, math.min(1.0, val))
+    bump_state()
+    return true
   end
 
   function api.TrackFX_GetNamedConfigParm(tr, fx_idx, parmname)

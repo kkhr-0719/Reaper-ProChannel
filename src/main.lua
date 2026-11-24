@@ -1,5 +1,5 @@
 -- src/main.lua
--- Reaper ProChannel (ReaPCh) v0.1.0 — 入口脚本
+-- Reaper ProChannel (ReaPCh) v0.2.0 — 入口脚本
 -- 职责：ReaImGui 环境检测、上下文创建（启用 Docking）、状态变化防抖轮询与 defer 主循环。
 
 if not reaper then

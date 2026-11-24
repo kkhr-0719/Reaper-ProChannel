@@ -483,6 +483,191 @@ run_test("上半区未初始化直接添加插件（含失败回滚）、区内�
 end)
 
 --------------------------------------------------------------------------------
+-- 用例 8 (v0.2.0)：EnumInstalledFX 插件枚举缓存、多关键词搜索过滤与特殊字符防御
+--------------------------------------------------------------------------------
+run_test("v0.2.0 EnumInstalledFX 插件枚举缓存、强制刷新、多关键词过滤与特殊字符防御", function(r)
+  -- 8.1 默认枚举应自动过滤掉裸 Container，仅保留 7 个真实插件
+  local all_fx = core.get_installed_fx()
+  assert_eq(#all_fx, 7, "installed_fx excludes bare Container (7 plugins)")
+  assert_eq(all_fx[1].name, "VST3: ReaEQ (Cockos)", "first cached plugin name")
+  assert_eq(all_fx[1].format, "VST3", "first cached plugin format parsed")
+
+  -- 8.2 缓存命中与 force_refresh 强制刷新校验
+  r.mock_set_installed_fx({
+    { name = "Container", ident = "Container" },
+    { name = "", ident = "" },
+    { name = "VST3: Pro-Q 3 (FabFilter)", ident = "FabFilter Pro-Q 3.vst3" },
+    { name = "CLAP: Vital+ [100%] (Matt Tytel)", ident = "vital.clap" },
+    { name = "JS: Volume Adjustment", ident = "utility/volume" },
+  })
+  -- 未传 force_refresh 时应返回旧缓存 (7 项)
+  assert_eq(#core.get_installed_fx(false), 7, "returns cached list without force_refresh")
+  -- 传入 force_refresh = true 时应重新扫描并过滤掉 Container 与空项 (剩 3 项)
+  local refreshed = core.get_installed_fx(true)
+  assert_eq(#refreshed, 3, "force_refresh rescans and filters empty/Container")
+
+  -- 8.3 多关键词大小写不敏感与正则特殊字符（- + [ ] ( ) % .）纯文本安全匹配
+  local res_eq, total_eq = core.filter_installed_fx("vst3 pro-q (fabfilter)")
+  assert_eq(total_eq, 1, "multi-token query with hyphens and parens matches 1")
+  assert_eq(res_eq[1].name, "VST3: Pro-Q 3 (FabFilter)", "matched Pro-Q 3")
+
+  local res_special, total_special = core.filter_installed_fx("vital+ [100%]")
+  assert_eq(total_special, 1, "query with +, [, ], % special chars does not throw pattern error")
+  assert_eq(res_special[1].format, "CLAP", "matched CLAP Vital+")
+
+  -- 按 ident 内部路径关键词搜索（如 utility/volume）
+  local res_ident, total_ident = core.filter_installed_fx("utility/volume")
+  assert_eq(total_ident, 1, "query matches plugin ident")
+  assert_eq(res_ident[1].name, "JS: Volume Adjustment", "matched JS Volume Adjustment by ident")
+
+  -- 8.4 max_results 截断与 total_matched 统计
+  local res_lim, total_lim = core.filter_installed_fx("", 2)
+  assert_eq(total_lim, 3, "empty query total_matched == 3")
+  assert_eq(#res_lim, 2, "max_results == 2 caps returned list length to 2")
+
+  -- 8.5 搜索结果直接添加至上半区与下半区闭环
+  local tr = r.mock_add_track("Search & Add Track")
+  assert_true(core.add_fx_to_strip(tr, res_eq[1].add_name), "add searched plugin to strip")
+  assert_true(core.add_normal_fx(tr, res_special[1].add_name), "add searched plugin to normal zone")
+  local vm = core.build_view_model(tr)
+  assert_eq(#vm.strip.children, 1, "1 plugin in strip from search")
+  assert_eq(vm.strip.children[1].name, "VST3: Pro-Q 3 (FabFilter)", "strip plugin name from search")
+  assert_eq(#vm.normal_fx, 1, "1 plugin in normal zone from search")
+  assert_eq(vm.normal_fx[1].name, "CLAP: Vital+ [100%] (Matt Tytel)", "normal plugin name from search")
+
+  -- 8.6 宿主缺失 EnumInstalledFX 时的安全降级
+  r.EnumInstalledFX = nil
+  core.clear_installed_fx_cache()
+  local empty_list, empty_total = core.filter_installed_fx("eq")
+  assert_eq(#empty_list, 0, "graceful empty list when EnumInstalledFX is missing")
+  assert_eq(empty_total, 0, "graceful 0 total when EnumInstalledFX is missing")
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 9 (v0.2.0)：单行 Wet/Dry 原生干湿比读写、边界夹紧、偏离保持与 Undo 控制
+--------------------------------------------------------------------------------
+run_test("v0.2.0 单行 Wet/Dry 原生参数读写（覆盖容器子项、常规槽、夹紧、回退与 Undo 控制）", function(r)
+  local tr = r.mock_add_track("Parallel Compression")
+  core.add_fx_to_strip(tr, "VST3: API550A")
+  core.add_fx_to_strip(tr, "VST3: 1176Comp")
+  core.add_normal_fx(tr, "VST3: PlateReverb")
+
+  -- 9.1 默认干湿比为 1.0 (100%)
+  local vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].wet, 1.0, "strip child 1 default wet == 1.0")
+  assert_eq(vm.strip.children[1].wet_percent, 100, "strip child 1 default wet_percent == 100")
+  assert_eq(vm.normal_fx[1].wet, 1.0, "normal fx 1 default wet == 1.0")
+  assert_eq(vm.normal_fx[1].wet_percent, 100, "normal fx 1 default wet_percent == 100")
+
+  -- 9.2 修改 0 号位容器子项与下半区常规插件的 Wet/Dry
+  local child2_id = vm.strip.children[2].fx_id
+  local norm1_id = vm.normal_fx[1].fx_id
+
+  local undo_before = #r._state.undo_history
+  -- 模拟 UI 连续拖拽过程 (record_undo = false)：实时更新参数但不产生 Undo 记录
+  local ok_drag, val_drag = core.set_fx_wet(tr, child2_id, 0.42, false)
+  assert_true(ok_drag, "set_fx_wet during drag succeeds")
+  assert_eq(val_drag, 0.42, "applied wet == 0.42")
+  assert_eq(#r._state.undo_history, undo_before, "record_undo=false does not add undo entry")
+
+  -- 模拟松手提交 (record_undo = true)
+  local ok_commit, val_commit = core.set_fx_wet(tr, child2_id, 0.35, true)
+  assert_true(ok_commit, "set_fx_wet on release succeeds")
+  assert_eq(val_commit, 0.35, "applied wet == 0.35")
+  assert_eq(#r._state.undo_history, undo_before + 1, "record_undo=true adds 1 undo entry")
+
+  assert_true(core.set_fx_wet(tr, norm1_id, 0.68), "set_fx_wet on normal fx succeeds")
+
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[2].wet, 0.35, "strip child 2 wet updated to 0.35")
+  assert_eq(vm.strip.children[2].wet_percent, 35, "strip child 2 wet_percent == 35")
+  assert_eq(vm.normal_fx[1].wet, 0.68, "normal fx 1 wet updated to 0.68")
+  assert_eq(vm.normal_fx[1].wet_percent, 68, "normal fx 1 wet_percent == 68")
+
+  -- 9.3 边界夹紧 (<0 夹紧至 0.0, >1 夹紧至 1.0) 与非法输入拦截
+  local ok_low, clamped_low = core.set_fx_wet(tr, child2_id, -0.5)
+  assert_true(ok_low, "negative wet clamped ok")
+  assert_eq(clamped_low, 0.0, "negative wet clamped to 0.0")
+  local _, read_low = core.get_fx_wet(tr, child2_id)
+  assert_eq(read_low, 0.0, "get_fx_wet reads 0.0")
+
+  local ok_high, clamped_high = core.set_fx_wet(tr, child2_id, 2.5)
+  assert_true(ok_high, "wet > 1 clamped ok")
+  assert_eq(clamped_high, 1.0, "wet > 1 clamped to 1.0")
+
+  assert_false(core.set_fx_wet(tr, child2_id, 0 / 0), "reject NaN wet value")
+  assert_false(core.set_fx_wet(tr, child2_id, "0.5"), "reject non-number wet value")
+  assert_false(core.set_fx_wet(tr, 999, 0.5), "reject out-of-bounds top-level fx_id")
+  local oob_child = core.encode_container_item_index(0, 9, r.TrackFX_GetCount(tr))
+  assert_false(core.set_fx_wet(tr, oob_child, 0.5), "reject out-of-bounds container child fx_id")
+
+  -- 9.4 当 TrackFX_GetParamFromIdent 不可用时，自动回退至 TrackFX_GetNumParams + TrackFX_GetParamName("Wet")
+  r.TrackFX_GetParamFromIdent = nil
+  assert_true(core.set_fx_wet(tr, child2_id, 0.25), "fallback set_fx_wet without TrackFX_GetParamFromIdent")
+  local ok_fb, val_fb = core.get_fx_wet(tr, child2_id)
+  assert_true(ok_fb, "fallback get_fx_wet succeeds")
+  assert_eq(val_fb, 0.25, "fallback get_fx_wet reads 0.25")
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 10 (v0.2.0)：双区完整操作闭环（双向拖拽排序 from<to / from>to、跨偏离容器排序与干湿比跟随）
+--------------------------------------------------------------------------------
+run_test("v0.2.0 双区完整操作闭环（双向排序 from<to & from>to、跨偏离容器排序与状态保持）", function(r)
+  local tr = r.mock_add_track("Full Loop Track")
+
+  -- 10.1 上半区添加 4 个子插件并各自设置不同干湿比
+  core.add_fx_to_strip(tr, "VST3: StripA")
+  core.add_fx_to_strip(tr, "VST3: StripB")
+  core.add_fx_to_strip(tr, "VST3: StripC")
+  core.add_fx_to_strip(tr, "VST3: StripD")
+
+  local vm = core.build_view_model(tr)
+  core.set_fx_wet(tr, vm.strip.children[1].fx_id, 0.10)
+  core.set_fx_wet(tr, vm.strip.children[2].fx_id, 0.20)
+  core.set_fx_wet(tr, vm.strip.children[3].fx_id, 0.30)
+  core.set_fx_wet(tr, vm.strip.children[4].fx_id, 0.40)
+
+  -- 上半区正向拖拽 (from < to)：将槽位 1 (StripA, 10%) 拖至槽位 4
+  assert_true(core.move_strip_fx(tr, 1, 4), "move_strip_fx 1 -> 4 (from < to)")
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].name, "VST3: StripB", "after 1->4: slot 1 is StripB")
+  assert_eq(vm.strip.children[2].name, "VST3: StripC", "after 1->4: slot 2 is StripC")
+  assert_eq(vm.strip.children[3].name, "VST3: StripD", "after 1->4: slot 3 is StripD")
+  assert_eq(vm.strip.children[4].name, "VST3: StripA", "after 1->4: slot 4 is StripA")
+  assert_eq(vm.strip.children[4].wet_percent, 10, "StripA kept 10% wet after move 1->4")
+
+  -- 上半区反向拖拽 (from > to)：将槽位 3 (StripD, 40%) 拖至槽位 1
+  assert_true(core.move_strip_fx(tr, 3, 1), "move_strip_fx 3 -> 1 (from > to)")
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].name, "VST3: StripD", "after 3->1: slot 1 is StripD")
+  assert_eq(vm.strip.children[1].wet_percent, 40, "StripD kept 40% wet after move 3->1")
+  assert_eq(vm.strip.children[2].name, "VST3: StripB", "after 3->1: slot 2 is StripB")
+
+  -- 10.2 下半区添加 3 个常规插件，并模拟 0 号位容器偏离至中间 (top_index 1) 时的跨容器边界排序
+  core.add_normal_fx(tr, "VST3: Norm1")
+  core.add_normal_fx(tr, "VST3: Norm2")
+  core.add_normal_fx(tr, "VST3: Norm3")
+
+  -- 将 Strip 容器从 top_index 0 移至 top_index 1
+  -- 此时顶层链：[0: Norm1, 1: StripContainer, 2: Norm2, 3: Norm3]
+  r.TrackFX_CopyToTrack(tr, 0, tr, 1, true)
+  vm = core.build_view_model(tr)
+  assert_true(vm.strip.is_displaced, "strip displaced to index 1")
+  assert_eq(vm.normal_fx[1].name, "VST3: Norm1", "displaced normal 1 is Norm1 (top 0)")
+  assert_eq(vm.normal_fx[2].name, "VST3: Norm2", "displaced normal 2 is Norm2 (top 2)")
+  assert_eq(vm.normal_fx[3].name, "VST3: Norm3", "displaced normal 3 is Norm3 (top 3)")
+
+  -- 在容器偏离在中间时，将下半区 visual_slot 1 (Norm1) 正向拖到 visual_slot 3 (Norm3)
+  assert_true(core.move_normal_fx(tr, 1, 3), "move_normal_fx 1 -> 3 across displaced strip")
+  vm = core.build_view_model(tr)
+  assert_true(vm.strip.initialized, "strip container still initialized")
+  assert_eq(#vm.strip.children, 4, "all 4 strip children untouched")
+  assert_eq(vm.normal_fx[1].name, "VST3: Norm2", "after 1->3: normal slot 1 is Norm2")
+  assert_eq(vm.normal_fx[2].name, "VST3: Norm3", "after 1->3: normal slot 2 is Norm3")
+  assert_eq(vm.normal_fx[3].name, "VST3: Norm1", "after 1->3: normal slot 3 is Norm1")
+end)
+
+--------------------------------------------------------------------------------
 -- 汇总结果与退出码
 --------------------------------------------------------------------------------
 _G.reaper = host_reaper

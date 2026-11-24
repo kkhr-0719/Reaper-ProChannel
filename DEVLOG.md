@@ -1,35 +1,47 @@
 # DEVLOG.md
 
-- **当前版本**：`v0.1.0`（核心骨架 + 朴素双区 MVP）
+- **当前版本**：`v0.2.0`（完整操作闭环 + 朴素 ImGui 默认布局；视觉体系定型待触发 UI 建构门禁）
 - **项目简称**：`ReaPCh`（Reaper ProChannel）
 - **前置环境**：
-  - `docs/imgui.lua`：已确认，本机 ReaImGui 动态垫片（`reaper_imgui-x64` `v0.10.0.5`），支持 `require 'imgui' '0.10'`（向下兼容 `'0.9'`）；垫片在加载时已对 `flags & 1 ~= 0` 的枚举常量预求值，且遵循 ReaImGui 0.9/0.10 规范仅在 `ImGui.Begin` 返回 `visible == true` 时调用 `ImGui.End`。
-  - `tests/run.lua`：已在 REAPER 7 宿主内置 Lua 5.4 环境中实机运行，7 组边界单元测试全部通过（`Total: 7 | Passed: 7 | Failed: 0`）。
+  - `docs/imgui.lua`：已确认，本机 ReaImGui 动态垫片（`reaper_imgui-x64` `v0.10.0.5`），支持 `require 'imgui' '0.10'`（向下兼容 `'0.9'`）；垫片在加载时已对 `flags & 1 ~= 0` 的枚举常量预求值，且遵循 ReaImGui 0.9/0.10 规范仅在 `ImGui.Begin` / `ImGui.BeginChild` 返回 `visible == true` 时调用 `ImGui.End` / `ImGui.EndChild`。
+  - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；`v0.2.0` 扩展至 **10 组**边界单元测试用例（新增 `EnumInstalledFX` 枚举缓存与搜索、单行 Wet/Dry 原生参数读写、双区双向排序与跨偏离容器排序闭环）。
 
-## 已完成（`v0.1.0`）
-- **`src/core.lua`（纯逻辑层，零 ImGui 依赖）**：
-  - 实现 0 号位容器 `P_EXT:REAPCH_STRIP_GUID`（向下兼容读取 `P_EXT:RPROCH_STRIP_GUID`）持久化认亲、按需初始化（顶层 `index 0` 创建 `Container` 并重命名为 `◆ CHANNEL STRIP ◆`）与手动删空容器优雅降级。
-  - 实现 REAPER 7.06+ 容器编址公式 `0x2000000 + (child_pos_0based + 1) * (parent_fx_count + 1) + (container_idx_0based + 1)` 的正反解、子插件平铺读取、向容器末尾添加插件（未初始化时自动先建容器再置入，若插件实例化失败则自动原子回滚已建容器与 `P_EXT`）、容器内排序与删除。
-  - 实现 MCP 手滑偏离检测（`container_index > 0`）、一键归位（`snap_strip_to_top`）与 `Auto-Snap Strip to Slot 0` 自动归位逻辑。
-  - 实现下半区常规 FX 过滤（隐藏 0 号位容器本体）、`1..N` 视觉重编号映射（`visual_slot_to_top_index`）以及常规 FX 插入（`add_normal_fx`）、排序（`move_normal_fx`）、删除（`delete_normal_fx` / `delete_top_fx_guarded`）全套边界硬拦截（无论容器在 `0` 号位还是偏离至非 `0` 号位均严禁误伤或挤占容器）。
-  - 实现整区总 Bypass、单行 Bypass、原生 VST 悬浮窗显隐切换（含越界 `fx_id` 防御校验）及 `ExtState("REAPCH", ...)`（向下兼容读取 `"RPROCH"`）配置持久化。
-- **`tests/mock_reaper.lua` & `tests/run.lua`（单元测试套件）**：
-  - 实现完整模拟 REAPER 7.06+ 轨道、顶层 FX、`0x2000000+` 容器编址、`TrackFX_CopyToTrack`、`P_EXT` 与 `ExtState` 的纯 Lua 测试桩。
-  - 编写并实机跑通覆盖 `docs/SPEC.md` 5.5 节全部 6 类必测边界场景及容器内排序/移除/Bypass/悬浮窗/ExtState 的 7 组单元测试用例；修复 `run_test` 输出中 `[PASS] 1. 1.` 序号重复问题。
-- **`src/main.lua`、`src/ui.lua`、`src/theme.lua` & `README.md`（朴素双区 MVP）**：
-  - 实现 ReaImGui 环境兜底检测、`0.10`/`0.9` 垫片加载、启用 `ConfigFlags_DockingEnable` 的可停靠上下文及基于 `GetProjectStateChangeCount(0)` + `GetSelectedTrack(0, 0)` 的零空转扫描防抖主循环（已在 REAPER 7 实机启动验证）。
-  - 实现朴素 ImGui 默认布局的上下双区面板、偏离警告条与 `[一键归位]` 按钮。
-  - 在右上角 `⚙` 设置菜单中新增 **`[一键停靠至 REAPER Docker]` / `[脱离停靠 (恢复浮动窗口)]`** 快捷按钮（基于 `ImGui.SetNextWindowDockID` 与 `ImGui.IsWindowDocked`），并在 `README.md` 补充 ReaImGui 窗口停靠至 REAPER 左侧 Docker 的完整操作指南。
-- **Git 仓库与分支规范**：
-  - 初始化 Git 仓库，校验命中目录级 `includeIf` 独立身份配置（含 `credential.useHttpPath true`），在 `feat/v0.1.0-mvp` 分支完成提交。
+## 已完成（`v0.2.0` 核心逻辑与朴素操作闭环）
+- **`src/core.lua`（纯逻辑层扩展，零 ImGui 依赖）**：
+  - **已安装插件枚举缓存与多关键词搜索（`EnumInstalledFX`）**：实现 `core.get_installed_fx(force_refresh)`、`core.clear_installed_fx_cache()` 与 `core.filter_installed_fx(query, max_results, force_refresh)`；自动过滤空项与裸 `Container` 容器本体，解析插件格式前缀（`VST3` / `VST` / `CLAP` / `JS` 等），支持空格分词多关键词联合检索与纯文本子串匹配（`string.find(..., 1, true)`，彻底免疫插件名或搜索词中 `- + ( ) [ ] % .` 等正则特殊字符引发的模式报错）。
+  - **单行 Wet/Dry 原生干湿比参数读写**：实现 `core.get_fx_wet_param_index(tr, fx_id)`（优先调用 `TrackFX_GetParamFromIdent(tr, fx_id, ":wet")`，自动向下兼容回退 `TrackFX_GetNumParams` + `TrackFX_GetParamName("Wet")`）、`core.get_fx_wet(tr, fx_id)` 与 `core.set_fx_wet(tr, fx_id, wet_0_to_1, record_undo)`；支持顶层常规插件与 `0x2000000+` 容器子插件的干湿比读写、`[0.0, 1.0]` 边界夹紧、NaN/越界拦截及拖拽过程中的按需 Undo 控制（`record_undo = false` 实时调参不刷 Undo，松手时 `record_undo = true` 记录单条 Undo）；视图模型每项自动输出 `wet` (`0.0..1.0`) 与 `wet_percent` (`0..100`)。
+- **`tests/mock_reaper.lua` & `tests/run.lua`（单元测试套件扩展至 10 组）**：
+  - 在 `mock_reaper.lua` 中新增 `EnumInstalledFX`、`mock_set_installed_fx`、`TrackFX_GetParamFromIdent(":wet")`、`TrackFX_GetNumParams`、`TrackFX_GetParamName`、`TrackFX_GetParam`、`TrackFX_SetParam` 及节点 `wet` 状态跨容器复制/移动保持。
+  - 在完整保留 `v0.1.0` 全部 7 组单元测试的基础上，新增用例 8（`EnumInstalledFX` 缓存、强制刷新、多关键词与特殊字符过滤、搜索添加闭环）、用例 9（单行 Wet/Dry 读写、边界夹紧、回退机制与 Undo 控制）、用例 10（双区双向排序 `from < to` & `from > to`、跨偏离容器排序与干湿比状态保持）。
+- **`src/ui.lua`（朴素 ImGui 默认控件接通 `v0.2.0` 完整操作闭环）**：
+  - **双区独立 `+ 添加` 插件搜索弹窗**：上半区与下半区标题栏各自提供 `+ 添加` 按钮，点击弹出带自动聚焦搜索框的已安装插件列表（支持关键词即时过滤、清空搜索、手动刷新插件缓存；未初始化 Strip 时点击上半区 `+ 添加` 并选中插件可自动创建 0 号位容器并置入）。
+  - **双区各自内部拖拽排序与右键/快捷移除**：基于独立 Drag & Drop Payload 类型（`REAPCH_DND_STRIP` vs `REAPCH_DND_NORMAL`）实现双区严格物理隔离的区内拖拽排序；每行同时提供右键上下文菜单（打开/隐藏悬浮窗、启用/旁通、重置干湿比为 100%、上移 ▲ / 下移 ▼、移除插件）及行尾 `×` 快捷移除按钮。
+  - **单行轻量级 Wet/Dry 调节**：每行右侧提供 `0%..100%` 干湿比滑条，拖拽过程中实时更新宿主音频参数，松手时（`IsItemDeactivatedAfterEdit`）合并记录单次 Undo。
 
-## 已知问题 / UI Backlog（待后续精修）
-- **`v0.2.0` 待建构项（涉及视觉体系定型前需触发 UI 建构门禁）**：
-  - 双区独立 `+` 添加插件搜索弹窗（基于 `reaper.EnumInstalledFX` 缓存与关键词过滤）。
-  - 双区各自内部拖拽排序（ImGui Drag & Drop 绑定 `core.move_strip_fx` / `core.move_normal_fx`）与右键/快捷移除。
-  - 单行轻量级 Wet/Dry 干湿比调节。
-  - 触发 UI 建构门禁后，完成 `src/theme.lua` 的 Studio Dark 配色定型与 `reaper.GetThemeColor()` 宿主主题配色适配。
+## 已完成（`v0.1.0` 基础回顾）
+- 0 号位容器 `P_EXT:REAPCH_STRIP_GUID` 持久化认亲、按需初始化（`◆ CHANNEL STRIP ◆`）、手动删容器优雅降级、MCP 手滑偏离检测与一键/自动归位。
+- REAPER 7.06+ `0x2000000+` 容器编址正反解、下半区隐藏容器与 `1..N` 视觉重编号映射、全套边界硬拦截。
+- ReaImGui `0.10`/`0.9` 可停靠上下文、`GetProjectStateChangeCount` 零空转扫描防抖循环及右上角 `⚙ -> [一键停靠至 REAPER Docker]`。
+
+## 待触发 UI 建构门禁项（`v0.2.0` 视觉体系定型）
+按 `AGENTS.md` **UI 建构门禁（额度保护）** 规定，以下涉及重大 UI 建构的工作在核心操作闭环跑通后暂停，待用户确认执行方式（切换指定模型执行 / 当前模型直接实现 / 暂且搁置）：
+1. **`src/theme.lua` Studio Dark 视觉体系定型与宿主配色适配**（预估复杂度：**中**）：
+   - 低饱和中性深色配色栈（区分 0 号位音色塑形区与下半区常规槽的卡片底色、边框与激活态高亮）。
+   - 实验性 `跟随 REAPER 宿主主题配色` 开关实现（基于 `reaper.GetThemeColor()` 读取宿主背景/文字色，附带明度对比度安全兜底以防第三方位图皮肤文字不可读）。
+2. **双区卡片排版与拖拽视觉反馈精修**（预估复杂度：**中**）：
+   - 紧凑单行间距、Bypass 状态指示灯、拖拽目标插入高亮线及 Wet/Dry 微型控件视觉打磨。
+
+## 远期规划备忘：单轨 Inspector 混音扩展笔记（`v0.4.0+`，排在双区 FX 核心路线之后）
+用户已确认的远期演进方向（在双区 FX 与 `v0.3.0` Strip 预设体系稳定后按以下优先级推进）：
+1. **单轨混音核心组件（高优先级远期项）**：
+   - **顶部录音与高频通道开关**：录音预备（`R`）、监听（`Mon`）、静音（`M`）、独奏（`S`）、反相（`Ø`）。
+   - **发送槽列表（`Sends`）**：轨道发送列表展示、发送量快捷调节与静音开关。
+   - **底部声像/宽度与推子区**：`Pan / Width`（UI 阶段倾向采用**经典圆弧旋钮**而非水平拉条）+ 音量推子（Fader）+ 可选实时 L/R 电平表。
+2. **底部 `In / MIDI / Out` 路由摘要（中低优先级远期项）**：
+   - 仅做**轻量两行文字状态摘要展示**（如当前输入源与 Master Send 状态）+ **点击呼出 REAPER 原生路由窗口**，不在窄侧边栏内重造复杂路由矩阵。
+3. **顶部 Pre-FX Gain 旋钮（低优先级 Opt-in 可选项）**：
+   - 不强制默认内置；作为低优先级可选方案（Opt-in），仅在用户显式开启时按需调用 REAPER 原厂自带的 `JS: Volume Adjustment` 联动 dB 参数。
 
 ## 下一步
-1. 在 REAPER 7 中验证 `⚙ -> [一键停靠至 REAPER Docker]` 及双区日常轨道切换/初始化/Bypass/弹窗交互。
-2. 规划 `v0.2.0` 插件搜索弹窗、双区拖拽排序交互及 UI 建构门禁评估。
+1. 在 REAPER 7 内运行 `tests/run.lua` 验收全部 10 组单元测试，并在 `src/main.lua` 中实机体验双区 `+ 添加` 搜索弹窗、区内拖拽/右键排序、单行 Wet/Dry 滑条与 `×` 快捷移除。
+2. 触发 UI 建构门禁：由用户决定是否立即推进 `src/theme.lua` Studio Dark 配色与双区视觉精修，或先搁置视觉直接推进 `v0.3.0` Strip 预设管理。
