@@ -746,6 +746,7 @@ tagged_synth.vst3=Instrument|Synth
   assert_false(core.is_dxi_effect_exception("DXi: TTS-1 (Cakewalk)"), "TTS-1 is genuine DXi instrument")
 
   assert_false(core.is_instrument_fx("DXi: Sonitus:fx Delay"), "DXi: Sonitus:fx Delay exempted from instrument filter")
+  assert_false(core.is_instrument_fx({ name = "DXi: Sonitus:fx Delay", is_instrument = true }), "DXi: Sonitus:fx Delay table with is_instrument=true still exempted")
   assert_false(core.is_instrument_fx("DXi: Cakewalk Tempo Delay"), "DXi: Cakewalk Tempo Delay exempted from instrument filter")
   assert_false(core.is_instrument_fx("DXi: Cakewalk Classic Phaser"), "DXi: Cakewalk Classic Phaser exempted from instrument filter")
   assert_false(core.is_instrument_fx("DXi: Cakewalk Modfilter"), "DXi: Cakewalk Modfilter exempted from instrument filter")
@@ -753,20 +754,20 @@ tagged_synth.vst3=Instrument|Synth
 
   r.mock_set_installed_fx({
     { name = "VST3: ReaEQ (Cockos)", ident = "reaeq.vst3" },
-    { name = "DX: Sonitus:fx Compressor", ident = "{3921B983-1029-11D3-A968-00A0C922E6EC}" },
+    { name = "DX: Sonitus:fx Compressor (Cakewalk)", ident = "Sonitus:fx Compressor" },
   })
   r.mock_set_resource_file("reaper-dxplugins64.ini", [[
 [{3921B983-1029-11D3-A968-00A0C922E6EC}]
-Name=DX: Sonitus:fx Compressor
+Name=Sonitus:fx Compressor
 Load=1
 
 [{3921B985-1029-11D3-A968-00A0C922E6EC}]
-Name=DX: Sonitus:fx Equalizer
+Name=Sony: Wave Hammer
 Load=1
 
 [{3921B987-1029-11D3-A968-00A0C922E6EC}]
-Name=DXi: Sonitus:fx Delay
-Load=1
+Name=Sonitus:fx Delay
+Load=2
 
 [{CAKEWALK-TEMPO-DELAY-GUID}]
 Name=DXi: Cakewalk Tempo Delay
@@ -781,19 +782,27 @@ Name=DXi: Cakewalk Modfilter
 Load=1
 
 [{CAKEWALK-TTS1-GUID}]
-Name=DXi: TTS-1 (Cakewalk)
-Load=1
+Name=TTS-1 (Cakewalk)
+Load=2
 
 [{00000000-0000-0000-0000-000000000000}]
 Name=DX: Disabled NonPlugin Codec
 Load=0
+
+[{11111111-1111-1111-1111-111111111111}]
+Name=Incomplete Scan Entry Without Load
 ]])
 
   local refresh_cnt_before = r._state.enum_installed_fx_refresh_count or 0
   local merged_all = core.get_installed_fx(true)
   assert_eq((r._state.enum_installed_fx_refresh_count or 0), refresh_cnt_before + 1, "force_refresh calls EnumInstalledFX(-1)")
-  -- 应包含：ReaEQ + Sonitus Compressor (已由 EnumInstalledFX 返回，去重不重复) + 新合并的 5 个 DX/DXi 效果器 + 1 个 DXi TTS-1 乐器 = 8 项 (Load=0 被忽略)
-  assert_eq(#merged_all, 8, "reaper-dxplugins64.ini Load=1 entries merged and deduplicated while Load=0 ignored")
+  -- 应包含：ReaEQ + Sonitus Compressor (已由 EnumInstalledFX 返回，去重不重复) + 新合并的 5 个 DX/DXi 效果器 + 1 个 DXi TTS-1 乐器 = 8 项 (Load=0 与缺失 Load 项被忽略)
+  assert_eq(#merged_all, 8, "reaper-dxplugins64.ini Load!=0 entries merged and deduplicated while Load=0 and missing-Load ignored")
+  assert_eq(merged_all[3].name, "DX: Sony: Wave Hammer", "DX plugin with vendor colon gets DX: prefix")
+  assert_eq(merged_all[3].format, "DX", "DX plugin with vendor colon has format DX")
+  assert_eq(merged_all[4].name, "DXi: Sonitus:fx Delay", "Load=2 entry gets DXi: prefix")
+  assert_false(merged_all[4].is_instrument, "DXi: Sonitus:fx Delay exempted as audio effect")
+  assert_eq(merged_all[4].category, "Delay", "DXi: Sonitus:fx Delay inferred as Delay")
 
   local dx_fx_only, dx_fx_total = core.filter_installed_fx("", nil, false, { include_instruments = false })
   assert_eq(dx_fx_total, 7, "default filter keeps all 4 DXi effect exceptions + 2 DX effects + ReaEQ, and hides DXi TTS-1")
@@ -923,6 +932,8 @@ Type0=16777216
   assert_eq(core.infer_fx_category("VST3: Volcano 3 (FabFilter)", "FabFilter Volcano 3.vst3", nil, false), "Filter", "FabFilter Volcano 3 inferred as Filter")
   assert_eq(core.infer_fx_category("VST3: Saturn 2 (FabFilter)", "FabFilter Saturn 2.vst3", nil, false), "Distortion", "FabFilter Saturn 2 inferred as Distortion")
   assert_eq(core.infer_fx_category("JS: Span Spectrum Analyzer", "analysis/span", nil, false), "Analyzer", "Analyzer plugin inferred as Analyzer")
+  assert_eq(core.infer_fx_category("VST3: SomeEQ", "some_eq.vst3", "Fx|EQ", false), "EQ", "Fx|EQ tag skips generic Fx prefix and resolves to EQ")
+  assert_eq(core.infer_fx_category("DXi: Sonitus:fx Delay", "{3921B987}", "Instrument|Delay", false), "Delay", "Exempted DXi effect skips Instrument tag segment and resolves to Delay")
 
   r.mock_set_resource_file("reaper-fxfolders.ini", [[
 [Folders]

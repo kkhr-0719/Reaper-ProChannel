@@ -1001,6 +1001,10 @@ end
 --- @param category_tag string|nil 可选的 reaper-fxtags.ini 分类标签
 --- @return boolean is_instrument
 function core.is_instrument_fx(name_or_item, category_tag)
+  if core.is_dxi_effect_exception(name_or_item) then
+    return false
+  end
+
   local fmt = ""
   local tag = category_tag
   if type(name_or_item) == "table" then
@@ -1014,10 +1018,6 @@ function core.is_instrument_fx(name_or_item, category_tag)
     tag = tag or name_or_item.tag_category
   elseif type(name_or_item) == "string" then
     fmt = name_or_item:match("^([%w_]+):%s+") or ""
-  end
-
-  if core.is_dxi_effect_exception(name_or_item) then
-    return false
   end
 
   if core.is_instrument_format(fmt) then
@@ -1408,23 +1408,25 @@ function core.parse_dxplugins_ini(content)
     local raw_name = trim_str(sec.kv["name"] or "")
     if raw_name ~= "" then
       local load_str = sec.kv["load"]
-      local is_enabled = true
+      local is_enabled = false
+      local load_num = nil
       if load_str ~= nil and trim_str(load_str) ~= "" then
-        local load_num = tonumber(load_str)
+        load_num = tonumber(load_str)
         if load_num ~= nil then
           is_enabled = (load_num ~= 0)
-        elseif trim_str(load_str):lower() == "false" then
-          is_enabled = false
+        elseif trim_str(load_str):lower() == "true" then
+          is_enabled = true
+          load_num = 1
         end
       end
 
       if is_enabled then
         local display_name = raw_name
-        local prefix = raw_name:match("^([%w_]+):%s+")
-        if not prefix then
+        local has_dx_prefix = (raw_name:match("^[dD][xX][iI]?:%s+") ~= nil)
+        if not has_dx_prefix then
           local dxi_flag = tonumber(sec.kv["dxi"] or sec.kv["isinst"] or "0") or 0
-          local load_num = tonumber(load_str or "1") or 1
-          if dxi_flag ~= 0 or load_num == 2 then
+          local effective_load = load_num or 1
+          if dxi_flag ~= 0 or effective_load == 2 then
             display_name = "DXi: " .. raw_name
           else
             display_name = "DX: " .. raw_name
@@ -1444,16 +1446,20 @@ end
 --- 根据 reaper-fxtags.ini 标签或插件名称/标识符智能推断功能分类（对齐 REAPER 原生分类名，消除重复分裂）
 function core.infer_fx_category(name, ident, tag_category, is_instrument)
   if type(tag_category) == "string" and trim_str(tag_category) ~= "" then
-    local primary = trim_str(tag_category:match("^([^|]+)") or tag_category)
-    if primary ~= "" then
-      local low_p = primary:lower()
-      if low_p == "instrument" or low_p == "instruments" or low_p == "synth" or low_p == "synthesizer" then
-        if is_instrument then
-          return "Instruments"
+    for raw_seg in tag_category:gmatch("[^|]+") do
+      local primary = trim_str(raw_seg)
+      if primary ~= "" then
+        local low_p = primary:lower()
+        if low_p == "fx" or low_p == "effect" or low_p == "effects" or low_p == "audio effect" or low_p == "plug-in" then
+          -- 跳过泛指的顶层 Fx / Audio Effect 标签段，继续提取后续具体功能分类段（如 Fx|EQ -> EQ）
+        elseif low_p == "instrument" or low_p == "instruments" or low_p == "synth" or low_p == "synthesizer" then
+          if is_instrument then
+            return "Instruments"
+          end
+          -- 若属于被豁免的 DXi 音频效果器例外 (is_instrument == false)，则忽略误标的 Instrument 标签段，继续检查下一标签段或按名称推断
+        else
+          return LEGACY_CATEGORY_ALIASES[low_p] or primary
         end
-        -- 若属于被豁免的 DXi 音频效果器例外 (is_instrument == false)，则忽略误标的 Instrument 标签，继续按名称推断效果器分类
-      else
-        return LEGACY_CATEGORY_ALIASES[low_p] or primary
       end
     end
   end
@@ -2067,13 +2073,14 @@ function core.get_installed_fx(force_refresh)
     local norm_ident = normalize_ident_key(clean_ident)
     local fmt_upper = fmt:upper()
     local is_dx_fmt = (fmt_upper == "DX" or fmt_upper == "DXI")
-    local dx_bare_key = is_dx_fmt and trim_str(display_name:gsub("^[%w_]+:%s+", "")):lower() or ""
+    local dx_bare_key = is_dx_fmt and trim_str(display_name:gsub("^[dD][xX][iI]?:%s+", "")):lower() or ""
+    local dx_short_key = (is_dx_fmt and type(short_name) == "string") and trim_str(short_name):lower() or ""
 
     if deduplicate then
       if seen_names[low_name] then
         return
       end
-      if is_dx_fmt and dx_bare_key ~= "" and seen_dx_bare[dx_bare_key] then
+      if is_dx_fmt and ((dx_bare_key ~= "" and seen_dx_bare[dx_bare_key]) or (dx_short_key ~= "" and seen_dx_bare[dx_short_key])) then
         return
       end
       if norm_ident ~= "" and seen_idents[norm_ident] then
@@ -2085,8 +2092,13 @@ function core.get_installed_fx(force_refresh)
     if norm_ident ~= "" then
       seen_idents[norm_ident] = true
     end
-    if is_dx_fmt and dx_bare_key ~= "" then
-      seen_dx_bare[dx_bare_key] = true
+    if is_dx_fmt then
+      if dx_bare_key ~= "" then
+        seen_dx_bare[dx_bare_key] = true
+      end
+      if dx_short_key ~= "" then
+        seen_dx_bare[dx_short_key] = true
+      end
     end
 
     local lookup_keys = ident_lookup_keys(clean_ident, display_name)
