@@ -561,6 +561,7 @@ run_test("v0.2.0 单行 Wet/Dry 原生参数读写（覆盖容器子项、常规
 
   -- 9.2 修改 0 号位容器子项与下半区常规插件的 Wet/Dry
   local child2_id = vm.strip.children[2].fx_id
+  local child2_guid = vm.strip.children[2].guid
   local norm1_id = vm.normal_fx[1].fx_id
 
   local undo_before = #r._state.undo_history
@@ -570,11 +571,14 @@ run_test("v0.2.0 单行 Wet/Dry 原生参数读写（覆盖容器子项、常规
   assert_eq(val_drag, 0.42, "applied wet == 0.42")
   assert_eq(#r._state.undo_history, undo_before, "record_undo=false does not add undo entry")
 
-  -- 模拟松手提交 (record_undo = true)
-  local ok_commit, val_commit = core.set_fx_wet(tr, child2_id, 0.35, true)
+  -- 模拟松手提交 (record_undo = true, pre_undo_wet_0_to_1 = 1.0)：先恢复拖拽前基线 1.0 再进入 UndoBlock 写入 0.35
+  local ok_commit, val_commit = core.set_fx_wet(tr, child2_id, 0.35, true, 1.0)
   assert_true(ok_commit, "set_fx_wet on release succeeds")
   assert_eq(val_commit, 0.35, "applied wet == 0.35")
   assert_eq(#r._state.undo_history, undo_before + 1, "record_undo=true adds 1 undo entry")
+  local last_block = r._state.undo_blocks[#r._state.undo_blocks]
+  assert_eq(last_block.begin_wet[child2_guid], 1.0, "Undo_BeginBlock captured pre-drag baseline wet 1.0")
+  assert_eq(last_block.end_wet[child2_guid], 0.35, "Undo_EndBlock captured final wet 0.35")
 
   assert_true(core.set_fx_wet(tr, norm1_id, 0.68), "set_fx_wet on normal fx succeeds")
 

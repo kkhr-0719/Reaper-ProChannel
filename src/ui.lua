@@ -13,6 +13,7 @@ local ui = {
   _browser_target_zone = "strip", -- "strip" | "normal"
   _fx_search_query = "",
   _focus_search_input = false,
+  _wet_edit_start = {},
 }
 
 local function enum_val(v)
@@ -94,13 +95,14 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty)
     ImGui.TextDisabled(ctx, string.format("匹配 %d 个插件", total_matched))
   end
 
+  local should_close_popup = false
   local list_visible = ImGui.BeginChild(ctx, "reapch_fx_browser_list", 330, 240)
   if list_visible then
     if #results == 0 then
       ImGui.TextDisabled(ctx, "  (未找到匹配的已安装插件)")
     else
       for idx, item in ipairs(results) do
-        ImGui.PushID(ctx, item.index or idx)
+        ImGui.PushID(ctx, tostring(item.index or idx))
         if ImGui.Selectable(ctx, item.name, false) then
           if ui._browser_target_zone == "strip" then
             core.add_fx_to_strip(vm.track, item.add_name)
@@ -108,13 +110,17 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty)
             core.add_normal_fx(vm.track, item.add_name)
           end
           mark_dirty()
-          ImGui.CloseCurrentPopup(ctx)
+          should_close_popup = true
         end
         ImGui.PopID(ctx)
       end
     end
     -- ReaImGui 0.9 / 0.10 规范：仅在 BeginChild 返回 true 时调用 EndChild
     ImGui.EndChild(ctx)
+  end
+
+  if should_close_popup then
+    ImGui.CloseCurrentPopup(ctx)
   end
 
   ImGui.EndPopup(ctx)
@@ -225,20 +231,25 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     ImGui.EndPopup(ctx)
   end
 
-  -- 3. 单行轻量级 Wet/Dry 干湿比调节（拖拽中实时生效不刷 Undo，松手时记录单条 Undo）
+  -- 3. 单行轻量级 Wet/Dry 干湿比调节（拖拽中实时生效不刷 Undo，松手时先恢复拖拽前基线再记录单条 Undo）
   ImGui.SameLine(ctx)
   if ImGui.SetNextItemWidth then
     ImGui.SetNextItemWidth(ctx, 52)
   end
   local cur_wet_pct = tonumber(item.wet_percent) or 100
   local chg_wet, new_wet_pct = ImGui.SliderInt(ctx, "##row_wet", cur_wet_pct, 0, 100, "%d%%")
-  if chg_wet then
-    core.set_fx_wet(vm.track, item.fx_id, new_wet_pct / 100.0, false)
-    mark_dirty()
+  if chg_wet and ui._wet_edit_start[row_id] == nil then
+    ui._wet_edit_start[row_id] = (type(item.wet) == "number") and item.wet or (cur_wet_pct / 100.0)
   end
-  if ImGui.IsItemDeactivatedAfterEdit and ImGui.IsItemDeactivatedAfterEdit(ctx) then
+  local deactivated = ImGui.IsItemDeactivatedAfterEdit and ImGui.IsItemDeactivatedAfterEdit(ctx)
+  if deactivated then
     local final_pct = chg_wet and new_wet_pct or cur_wet_pct
-    core.set_fx_wet(vm.track, item.fx_id, final_pct / 100.0, true)
+    local start_wet = ui._wet_edit_start[row_id]
+    ui._wet_edit_start[row_id] = nil
+    core.set_fx_wet(vm.track, item.fx_id, final_pct / 100.0, true, start_wet)
+    mark_dirty()
+  elseif chg_wet then
+    core.set_fx_wet(vm.track, item.fx_id, new_wet_pct / 100.0, false)
     mark_dirty()
   end
 
@@ -460,8 +471,8 @@ function ui.draw(ctx, ImGui, vm, settings, on_dirty)
     else
       render_upper_strip_zone(ctx, ImGui, vm, mark_dirty)
       render_lower_normal_zone(ctx, ImGui, vm, mark_dirty)
-      render_fx_browser_popup(ctx, ImGui, vm, mark_dirty)
     end
+    render_fx_browser_popup(ctx, ImGui, vm, mark_dirty)
 
     -- 注意：ReaImGui 0.9 / 0.10 规范要求仅在 ImGui.Begin 返回 visible == true 时调用 ImGui.End
     ImGui.End(ctx)

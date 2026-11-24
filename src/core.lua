@@ -208,8 +208,9 @@ end
 --- @param fx_id number 顶层索引或 0x2000000+ 容器子项编码
 --- @param wet_0_to_1 number 目标干湿比 (0.0 .. 1.0)
 --- @param record_undo boolean|nil 是否记录 Undo（默认 true；UI 连续拖拽过程中可传 false，松手时传 true）
+--- @param pre_undo_wet_0_to_1 number|nil 可选：连续拖拽开始前的初始干湿比（用于在 Undo_BeginBlock 前恢复基线快照，确保 Ctrl+Z 一步退回拖拽前状态）
 --- @return boolean ok, number|nil applied_wet
-function core.set_fx_wet(tr, fx_id, wet_0_to_1, record_undo)
+function core.set_fx_wet(tr, fx_id, wet_0_to_1, record_undo, pre_undo_wet_0_to_1)
   local r = core.get_reaper()
   if not is_valid_fx_id(r, tr, fx_id) or type(wet_0_to_1) ~= "number" then
     return false, nil
@@ -224,17 +225,26 @@ function core.set_fx_wet(tr, fx_id, wet_0_to_1, record_undo)
   end
   local clamped = math.max(0.0, math.min(1.0, wet_0_to_1))
   local use_undo = (record_undo ~= false)
+
+  local function apply_wet_param(val)
+    if type(r.TrackFX_SetParam) == "function" then
+      local ret = r.TrackFX_SetParam(tr, fx_id, param_idx, val)
+      return (ret ~= false)
+    elseif type(r.TrackFX_SetParamNormalized) == "function" then
+      local ret = r.TrackFX_SetParamNormalized(tr, fx_id, param_idx, val)
+      return (ret ~= false)
+    end
+    return false
+  end
+
   if use_undo then
+    if type(pre_undo_wet_0_to_1) == "number" and pre_undo_wet_0_to_1 == pre_undo_wet_0_to_1 then
+      local pre_clamped = math.max(0.0, math.min(1.0, pre_undo_wet_0_to_1))
+      apply_wet_param(pre_clamped)
+    end
     begin_undo(r)
   end
-  local ok = false
-  if type(r.TrackFX_SetParam) == "function" then
-    local ret = r.TrackFX_SetParam(tr, fx_id, param_idx, clamped)
-    ok = (ret ~= false)
-  elseif type(r.TrackFX_SetParamNormalized) == "function" then
-    local ret = r.TrackFX_SetParamNormalized(tr, fx_id, param_idx, clamped)
-    ok = (ret ~= false)
-  end
+  local ok = apply_wet_param(clamped)
   if use_undo then
     end_undo(r, "ReaPCh: Adjust FX Wet/Dry")
   end

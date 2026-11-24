@@ -32,6 +32,8 @@ function mock_reaper.new()
     guid_counter = 0,
     ext_state = {},
     undo_history = {},
+    undo_blocks = {},
+    _current_undo_begin_wet = nil,
     in_undo_block = false,
     installed_fx = {
       { name = "Container", ident = "Container" },
@@ -433,13 +435,42 @@ function mock_reaper.new()
     state.ext_state[sec_name][tostring(key or "")] = tostring(val or "")
   end
 
+  local function snapshot_all_wet()
+    local snap = {}
+    local function visit_list(list)
+      if not list then
+        return
+      end
+      for _, node in ipairs(list) do
+        if node.guid then
+          snap[node.guid] = node.wet
+        end
+        if node.children then
+          visit_list(node.children)
+        end
+      end
+    end
+    for _, tr in ipairs(state.tracks) do
+      visit_list(tr.fx_chain)
+    end
+    return snap
+  end
+
   function api.Undo_BeginBlock()
     state.in_undo_block = true
+    state._current_undo_begin_wet = snapshot_all_wet()
   end
 
   function api.Undo_EndBlock(desc, _flags)
     state.in_undo_block = false
-    state.undo_history[#state.undo_history + 1] = tostring(desc or "")
+    local d = tostring(desc or "")
+    state.undo_history[#state.undo_history + 1] = d
+    state.undo_blocks[#state.undo_blocks + 1] = {
+      desc = d,
+      begin_wet = state._current_undo_begin_wet or {},
+      end_wet = snapshot_all_wet(),
+    }
+    state._current_undo_begin_wet = nil
   end
 
   return api
