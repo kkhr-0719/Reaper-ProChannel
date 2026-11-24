@@ -672,6 +672,405 @@ run_test("v0.2.0 双区完整操作闭环（双向排序 from<to & from>to、跨
 end)
 
 --------------------------------------------------------------------------------
+-- 用例 11 (v0.2.0)：Synth / 虚拟乐器插件（VSTi/VST3i/CLAPi/AUi/LV2i/DXi 与 fxtags）默认过滤与切换
+--------------------------------------------------------------------------------
+run_test("v0.2.0 Synth 虚拟乐器插件识别、默认过滤与 include_instruments 按需包含", function(r)
+  r.mock_set_installed_fx({
+    { name = "Container", ident = "Container" },
+    { name = "VST3: ReaEQ (Cockos)", ident = "reaeq.vst3" },
+    { name = "VST: SSL G-Master Buss Compressor (Waves)", ident = "SSLComp.dll" },
+    { name = "JS: 1175 Compressor [Stillwell]", ident = "stillwell/1175" },
+    { name = "VST3i: Kontakt 7 (Native Instruments) (64 out)", ident = "Kontakt 7.vst3" },
+    { name = "VSTi: ReaSynth (Cockos)", ident = "reasynth.dll" },
+    { name = "CLAPi: Surge XT (Surge Synth Team)", ident = "org.surge-synth-team.surge-xt" },
+    { name = "AUi: Alchemy (Apple)", ident = "Alchemy.component" },
+    { name = "LV2i: Helm (Matt Tytel)", ident = "http://tytel.org/helm" },
+    { name = "VST3: Custom Tagged Synth (MockDev)", ident = "tagged_synth.vst3" },
+  })
+
+  r.mock_set_resource_file("reaper-fxtags.ini", [[
+[category]
+tagged_synth.vst3=Instrument|Synth
+]])
+
+  -- 11.1 格式与标签识别断言
+  assert_true(core.is_instrument_format("VSTi"), "VSTi is instrument format")
+  assert_true(core.is_instrument_format("vst3i"), "vst3i is instrument format")
+  assert_true(core.is_instrument_format("CLAPi"), "CLAPi is instrument format")
+  assert_true(core.is_instrument_format("AUi"), "AUi is instrument format")
+  assert_true(core.is_instrument_format("LV2i"), "LV2i is instrument format")
+  assert_true(core.is_instrument_format("DXi"), "DXi is instrument format")
+  assert_false(core.is_instrument_format("VST3"), "VST3 is not instrument format")
+  assert_false(core.is_instrument_format("CLAP"), "CLAP is not instrument format")
+  assert_false(core.is_instrument_format("JS"), "JS is not instrument format")
+  assert_true(core.is_instrument_fx("VST3: Lead (Dev)", "Synth|Lead"), "Synth|Lead tag is instrument")
+  assert_true(core.is_instrument_fx("VST3: Pad (Dev)", "Generator|Instrument"), "Generator|Instrument tag is instrument")
+  assert_false(core.is_instrument_fx("VST3: Comp (Dev)", "Dynamics|Compressor"), "Dynamics|Compressor tag is not instrument")
+
+  -- 11.2 get_installed_fx 包含全量非 Container 插件（9 项），且准确标记 is_instrument
+  local all_fx = core.get_installed_fx(true)
+  assert_eq(#all_fx, 9, "9 total non-Container plugins cached")
+  assert_false(all_fx[1].is_instrument, "ReaEQ is not instrument")
+  assert_true(all_fx[4].is_instrument, "VST3i Kontakt 7 is instrument")
+  assert_eq(all_fx[4].developer, "Native Instruments", "Kontakt 7 developer stripped (64 out)")
+  assert_true(all_fx[5].is_instrument, "VSTi ReaSynth is instrument")
+  assert_true(all_fx[6].is_instrument, "CLAPi Surge XT is instrument")
+  assert_true(all_fx[7].is_instrument, "AUi Alchemy is instrument")
+  assert_true(all_fx[8].is_instrument, "LV2i Helm is instrument")
+  assert_true(all_fx[9].is_instrument, "fxtags Instrument|Synth marked as instrument")
+
+  -- 11.3 filter_installed_fx 默认过滤所有 Synth / 乐器插件，仅返回 3 个音频效果器
+  local fx_only, total_fx_only = core.filter_installed_fx("")
+  assert_eq(total_fx_only, 3, "default filter_installed_fx excludes all 6 instruments")
+  assert_eq(#fx_only, 3, "only 3 audio effects returned by default")
+  assert_eq(fx_only[1].name, "VST3: ReaEQ (Cockos)", "audio effect 1")
+  assert_eq(fx_only[2].name, "VST: SSL G-Master Buss Compressor (Waves)", "audio effect 2")
+  assert_eq(fx_only[3].name, "JS: 1175 Compressor [Stillwell]", "audio effect 3")
+
+  -- 11.4 开启 include_instruments = true 后可检索到全部 9 个插件（含 Synth）
+  local with_inst, total_with_inst = core.filter_installed_fx("", nil, false, { include_instruments = true })
+  assert_eq(total_with_inst, 9, "include_instruments=true returns all 9 plugins")
+  assert_eq(#with_inst, 9, "9 plugins in list when include_instruments=true")
+
+  local surge_res, surge_cnt = core.filter_installed_fx("surge", nil, false, { include_instruments = false })
+  assert_eq(surge_cnt, 0, "searching synth name while include_instruments=false returns 0")
+  local surge_on, surge_on_cnt = core.filter_installed_fx("surge", nil, false, { include_instruments = true })
+  assert_eq(surge_on_cnt, 1, "searching synth name while include_instruments=true returns 1")
+  assert_eq(surge_on[1].name, "CLAPi: Surge XT (Surge Synth Team)", "matched CLAPi Surge XT")
+
+  -- 11.5 4 个被 REAPER 标为 DXi: 的已知音频效果器硬编码豁免例外，以及运行内扫描 DX (reaper-dxplugins64.ini + EnumInstalledFX(-1)) 增量刷新兜底
+  assert_true(core.is_dxi_effect_exception("DXi: Sonitus:fx Delay"), "Sonitus:fx Delay is DXi effect exception")
+  assert_true(core.is_dxi_effect_exception("DXi: Cakewalk Tempo Delay"), "Cakewalk Tempo Delay is DXi effect exception")
+  assert_true(core.is_dxi_effect_exception("DXi: Cakewalk Classic Phaser"), "Cakewalk Classic Phaser is DXi effect exception")
+  assert_true(core.is_dxi_effect_exception("DXi: Cakewalk Modfilter"), "Cakewalk Modfilter is DXi effect exception")
+  assert_false(core.is_dxi_effect_exception("DXi: TTS-1 (Cakewalk)"), "TTS-1 is genuine DXi instrument")
+
+  assert_false(core.is_instrument_fx("DXi: Sonitus:fx Delay"), "DXi: Sonitus:fx Delay exempted from instrument filter")
+  assert_false(core.is_instrument_fx("DXi: Cakewalk Tempo Delay"), "DXi: Cakewalk Tempo Delay exempted from instrument filter")
+  assert_false(core.is_instrument_fx("DXi: Cakewalk Classic Phaser"), "DXi: Cakewalk Classic Phaser exempted from instrument filter")
+  assert_false(core.is_instrument_fx("DXi: Cakewalk Modfilter"), "DXi: Cakewalk Modfilter exempted from instrument filter")
+  assert_true(core.is_instrument_fx("DXi: TTS-1 (Cakewalk)"), "DXi: TTS-1 identified as instrument")
+
+  r.mock_set_installed_fx({
+    { name = "VST3: ReaEQ (Cockos)", ident = "reaeq.vst3" },
+    { name = "DX: Sonitus:fx Compressor", ident = "{3921B983-1029-11D3-A968-00A0C922E6EC}" },
+  })
+  r.mock_set_resource_file("reaper-dxplugins64.ini", [[
+[{3921B983-1029-11D3-A968-00A0C922E6EC}]
+Name=DX: Sonitus:fx Compressor
+Load=1
+
+[{3921B985-1029-11D3-A968-00A0C922E6EC}]
+Name=DX: Sonitus:fx Equalizer
+Load=1
+
+[{3921B987-1029-11D3-A968-00A0C922E6EC}]
+Name=DXi: Sonitus:fx Delay
+Load=1
+
+[{CAKEWALK-TEMPO-DELAY-GUID}]
+Name=DXi: Cakewalk Tempo Delay
+Load=1
+
+[{CAKEWALK-PHASER-GUID}]
+Name=DXi: Cakewalk Classic Phaser
+Load=1
+
+[{CAKEWALK-MODFILTER-GUID}]
+Name=DXi: Cakewalk Modfilter
+Load=1
+
+[{CAKEWALK-TTS1-GUID}]
+Name=DXi: TTS-1 (Cakewalk)
+Load=1
+
+[{00000000-0000-0000-0000-000000000000}]
+Name=DX: Disabled NonPlugin Codec
+Load=0
+]])
+
+  local refresh_cnt_before = r._state.enum_installed_fx_refresh_count or 0
+  local merged_all = core.get_installed_fx(true)
+  assert_eq((r._state.enum_installed_fx_refresh_count or 0), refresh_cnt_before + 1, "force_refresh calls EnumInstalledFX(-1)")
+  -- 应包含：ReaEQ + Sonitus Compressor (已由 EnumInstalledFX 返回，去重不重复) + 新合并的 5 个 DX/DXi 效果器 + 1 个 DXi TTS-1 乐器 = 8 项 (Load=0 被忽略)
+  assert_eq(#merged_all, 8, "reaper-dxplugins64.ini Load=1 entries merged and deduplicated while Load=0 ignored")
+
+  local dx_fx_only, dx_fx_total = core.filter_installed_fx("", nil, false, { include_instruments = false })
+  assert_eq(dx_fx_total, 7, "default filter keeps all 4 DXi effect exceptions + 2 DX effects + ReaEQ, and hides DXi TTS-1")
+  assert_eq(#dx_fx_only, 7, "7 audio effects returned when include_instruments=false")
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 12 (v0.2.0)：插件分组体系（reaper-fxfolders.ini、reaper-fxtags.ini、分类/厂商/格式分组与脚本内自定义分组）
+--------------------------------------------------------------------------------
+run_test("v0.2.0 插件分组体系（fxfolders.ini 文件夹/智能文件夹、fxtags.ini、A-Z 分类与自定义分组持久化）", function(r)
+  r.mock_set_installed_fx({
+    { name = "VST3: Neve 1073 Preamp (UA) (stereo)", ident = "uaneve1073.vst3" },
+    { name = "VST3: Pro-Q 3 (FabFilter)", ident = "FabFilter Pro-Q 3.vst3" },
+    { name = "VST3: ReaEQ (Cockos) (8ch)", ident = "reaeq.vst3" },
+    { name = "VST: SSL G-Master Buss Compressor (Waves)", ident = "SSLComp.dll" },
+    { name = "JS: 1175 Compressor [Stillwell]", ident = "stillwell/1175" },
+    { name = "VST3: VintageVerb (Valhalla DSP)", ident = "ValhallaVintageVerb.vst3" },
+    { name = "JS: Volume Adjustment", ident = "utility/volume" },
+    { name = "VST3i: ReaSynth (Cockos)", ident = "reasynth.vst3" },
+  })
+
+  r.mock_set_resource_file("reaper-fxtags.ini", [[
+[category]
+uaneve1073.vst3=Channel Strip
+FabFilter_Pro_Q_3.vst3=EQ|Equalizer
+SSLComp.dll=Dynamics
+
+[developer]
+uaneve1073.vst3=Universal Audio
+]])
+
+  r.mock_set_resource_file("reaper-fxfolders.ini", [[
+[Folders]
+NbFolders=2
+Name0=Vocal Chain
+Id0=0
+Name1=All Compressors
+Id1=1
+
+[Folder0]
+Nb=2
+Item0=uaneve1073.vst3
+Type0=3
+Item1=FabFilter Pro-Q 3.vst3
+Type1=3
+
+[Folder1]
+Nb=1
+Item0=compressor
+Type0=16777216
+]])
+
+  core.get_installed_fx(true)
+
+  -- 12.1 脚本内自定义分组增删改查与 ExtState 持久化往返
+  assert_false(core.add_custom_fx_group("   "), "reject empty custom group name")
+  local ok_g1, g1_name = core.add_custom_fx_group("常用通道条")
+  assert_true(ok_g1 and g1_name == "常用通道条", "created custom group 常用通道条")
+  assert_true(core.assign_fx_to_custom_group("常用通道条", "uaneve1073.vst3"), "assign Neve to 常用通道条")
+  assert_true(core.assign_fx_to_custom_group("常用通道条", "SSLComp.dll"), "assign SSLComp to 常用通道条")
+  assert_true(core.assign_fx_to_custom_group("鼓组总线", "stillwell/1175"), "auto-create and assign to 鼓组总线")
+
+  -- 强制从 ExtState 重新反序列化校验持久化
+  local persisted_groups = core.get_custom_fx_groups(true)
+  assert_eq(#persisted_groups, 2, "2 custom groups persisted in ExtState")
+  assert_eq(persisted_groups[1].name, "常用通道条", "persisted group 1 name")
+  assert_eq(#persisted_groups[1].items, 2, "persisted group 1 has 2 items")
+  assert_true(core.is_fx_in_custom_group("常用通道条", "uaneve1073.vst3"), "Neve is in 常用通道条")
+
+  -- 12.2 按默认 "category" 模式获取分组列表（默认隐藏 VST3i ReaSynth，共匹配 7 个效果器）
+  -- 顺序应为：★ 自定义分组 -> 📁 reaper-fxfolders.ini 文件夹 -> 严格按 A–Z 纯字母序排列的功能分类（不强插人为置顶权重，且合并 EQ 不分裂）
+  local cat_groups, cat_total = core.get_grouped_installed_fx("", "category", { include_instruments = false })
+  assert_eq(cat_total, 7, "7 non-instrument FX matched")
+  assert_eq(cat_groups[1].name, "★ 常用通道条", "top group 1 is custom group ★ 常用通道条")
+  assert_eq(cat_groups[1].source, "custom", "group 1 source == custom")
+  assert_eq(#cat_groups[1].items, 2, "★ 常用通道条 has 2 matched items")
+
+  assert_eq(cat_groups[2].name, "★ 鼓组总线", "top group 2 is custom group ★ 鼓组总线")
+  assert_eq(#cat_groups[2].items, 1, "★ 鼓组总线 has 1 matched item")
+
+  assert_eq(cat_groups[3].name, "📁 Vocal Chain", "group 3 is REAPER fxfolder 📁 Vocal Chain")
+  assert_eq(cat_groups[3].source, "fxfolder", "group 3 source == fxfolder")
+  assert_eq(#cat_groups[3].items, 2, "📁 Vocal Chain matched Neve + Pro-Q 3")
+
+  assert_eq(cat_groups[4].name, "📁 All Compressors", "group 4 is REAPER Smart Folder 📁 All Compressors")
+  assert_eq(#cat_groups[4].items, 2, "Smart Folder 'compressor' matched SSLComp + 1175 Compressor")
+
+  -- 校验后续功能分类严格按 A–Z 字母顺序排列：Channel Strip -> Dynamics -> EQ -> Reverb -> Utility
+  assert_eq(cat_groups[5].name, "Channel Strip", "A-Z category 1: Channel Strip")
+  assert_eq(cat_groups[6].name, "Dynamics", "A-Z category 2: Dynamics")
+  assert_eq(#cat_groups[6].items, 2, "Dynamics has SSLComp and 1175")
+  assert_eq(cat_groups[7].name, "EQ", "A-Z category 3: EQ (merged fxtags EQ and inferred ReaEQ)")
+  assert_eq(#cat_groups[7].items, 2, "EQ has both Pro-Q 3 and ReaEQ without EQ & Filter split")
+  assert_eq(cat_groups[8].name, "Reverb", "A-Z category 4: Reverb")
+  assert_eq(cat_groups[9].name, "Utility", "A-Z category 5: Utility")
+
+  -- 12.3 按 "developer"（厂商）与 "format"（格式）与 "custom" 分组校验
+  local dev_groups = core.get_grouped_installed_fx("", "developer", { include_instruments = false })
+  assert_true(#dev_groups >= 6, "grouped by developer")
+  -- 校验 uaneve1073 的 developer 被 reaper-fxtags.ini 覆盖为 Universal Audio，且 ReaEQ (Cockos) (8ch) 提取为 Cockos
+  local found_ua, found_cockos = false, false
+  for _, g in ipairs(dev_groups) do
+    if g.name == "Universal Audio" and #g.items == 1 then
+      found_ua = true
+    elseif g.name == "Cockos" and #g.items == 1 then
+      found_cockos = true
+    end
+  end
+  assert_true(found_ua, "fxtags [developer] Universal Audio recognized")
+  assert_true(found_cockos, "Cockos extracted cleanly even with trailing (8ch)")
+
+  local fmt_groups = core.get_grouped_installed_fx("", "format", { include_instruments = false })
+  assert_eq(#fmt_groups, 3, "3 effect formats: JS, VST, VST3")
+
+  -- 12.4 从自定义分组移除单个插件与删除整组
+  assert_true(core.remove_fx_from_custom_group("常用通道条", "SSLComp.dll"), "remove SSLComp from 常用通道条")
+  assert_false(core.is_fx_in_custom_group("常用通道条", "SSLComp.dll"), "SSLComp no longer in 常用通道条")
+  assert_true(core.remove_custom_fx_group("鼓组总线"), "remove entire custom group 鼓组总线")
+  assert_eq(#core.get_custom_fx_groups(), 1, "1 custom group remains")
+
+  -- 12.5 回归防御：厂商名含 Filter (如 FabFilter Pro-C 2 / Pro-R / Saturn 2 / Timeless 3 / Volcano 3) 推断至对齐 REAPER 原生的独立分类，
+  --      且 Smart Folder 支持 NOT / OR / 引号短语，自定义分组精确匹配不得误命中同分类其他插件，
+  --      且分组模式下 max_results 按单组截断而不丢失排在后面的分组
+  assert_eq(core.infer_fx_category("VST3: Pro-C 2 (FabFilter)", "FabFilter Pro-C 2.vst3", nil, false), "Dynamics", "FabFilter Pro-C 2 inferred as Dynamics")
+  assert_eq(core.infer_fx_category("VST3: Pro-R (FabFilter)", "FabFilter Pro-R.vst3", nil, false), "Reverb", "FabFilter Pro-R inferred as Reverb")
+  assert_eq(core.infer_fx_category("VST3: Timeless 3 (FabFilter)", "FabFilter Timeless 3.vst3", nil, false), "Delay", "FabFilter Timeless 3 inferred as Delay")
+  assert_eq(core.infer_fx_category("VST3: Volcano 3 (FabFilter)", "FabFilter Volcano 3.vst3", nil, false), "Filter", "FabFilter Volcano 3 inferred as Filter")
+  assert_eq(core.infer_fx_category("VST3: Saturn 2 (FabFilter)", "FabFilter Saturn 2.vst3", nil, false), "Distortion", "FabFilter Saturn 2 inferred as Distortion")
+  assert_eq(core.infer_fx_category("JS: Span Spectrum Analyzer", "analysis/span", nil, false), "Analyzer", "Analyzer plugin inferred as Analyzer")
+
+  r.mock_set_resource_file("reaper-fxfolders.ini", [[
+[Folders]
+NbFolders=2
+Name0=Non-Waves Compressors
+Id0=0
+Name1=UA or Valhalla
+Id1=1
+
+[Folder0]
+Nb=1
+Item0=compressor NOT waves
+Type0=16777216
+
+[Folder1]
+Nb=1
+Item0="Universal Audio" OR "Valhalla DSP"
+Type0=16777216
+]])
+  core.get_installed_fx(true)
+
+  -- 将名为 "delay" 的虚拟标识加入自定义分组，绝不能因为 VintageVerb 分类为 "Reverb & Delay" 而误命中 VintageVerb
+  core.assign_fx_to_custom_group("仅Delay单项", "delay")
+  local adv_groups = core.get_grouped_installed_fx("", "custom", { include_instruments = false })
+  local non_waves_grp, ua_valhalla_grp, exact_delay_grp = nil, nil, nil
+  for _, g in ipairs(adv_groups) do
+    if g.raw_name == "Non-Waves Compressors" then
+      non_waves_grp = g
+    elseif g.raw_name == "UA or Valhalla" then
+      ua_valhalla_grp = g
+    elseif g.raw_name == "仅Delay单项" then
+      exact_delay_grp = g
+    end
+  end
+  assert_true(non_waves_grp ~= nil, "Smart Folder Non-Waves Compressors exists")
+  assert_eq(#non_waves_grp.items, 1, "Smart Folder 'compressor NOT waves' excludes Waves SSLComp and keeps Stillwell 1175")
+  assert_eq(non_waves_grp.items[1].ident, "stillwell/1175", "remaining compressor is stillwell/1175")
+
+  assert_true(ua_valhalla_grp ~= nil, "Smart Folder UA or Valhalla exists")
+  assert_eq(#ua_valhalla_grp.items, 2, "Smart Folder OR with quoted vendor phrases matched 2 plugins")
+
+  assert_true(exact_delay_grp ~= nil, "Custom group 仅Delay单项 exists")
+  assert_eq(#exact_delay_grp.items, 0, "exact custom group item 'delay' does not falsely match Reverb & Delay category")
+
+  -- 分组模式下传入小 max_results = 1 时，所有分类依然保留，仅单组 items 被截断为 1
+  local capped_cat_groups, capped_cat_total = core.get_grouped_installed_fx("", "category", { include_instruments = false, max_results = 1 })
+  assert_eq(capped_cat_total, 7, "total_matched still 7 when max_results=1 in grouped mode")
+  assert_true(#capped_cat_groups >= 7, "all non-empty groups preserved even with max_results=1")
+  for _, g in ipairs(capped_cat_groups) do
+    assert_true(#g.items <= 1, "each group items capped at max_results=1")
+  end
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 13 (v0.2.0)：上下双区跨区互相拖拽/移动 FX（含未初始化自动建容器、指定槽位插入、状态保持与 0 号位容器保护）
+--------------------------------------------------------------------------------
+run_test("v0.2.0 上下双区跨区互相拖拽 FX（常规槽<->0 号位 Strip 双向移入移出、自动建容器与边界保护）", function(r)
+  local tr = r.mock_add_track("Cross-Zone Drag Track")
+
+  -- 13.1 初始状态：0 号位 Strip 未初始化，下半区有 3 个常规插件（NormA, NormB, NormC）
+  core.add_normal_fx(tr, "VST3: NormA")
+  core.add_normal_fx(tr, "VST3: NormB")
+  core.add_normal_fx(tr, "VST3: NormC")
+
+  local vm = core.build_view_model(tr)
+  assert_false(vm.strip.initialized, "strip initially uninitialized")
+  assert_eq(#vm.normal_fx, 3, "3 normal FX initially")
+
+  -- 为 NormB 设置 45% 干湿比，并记录其 GUID
+  local norm_b_guid = vm.normal_fx[2].guid
+  core.set_fx_wet(tr, vm.normal_fx[2].fx_id, 0.45)
+
+  -- 将下半区 visual_slot 2 (NormB) 拖入尚未初始化的上半区 0 号位 Strip
+  assert_true(core.move_normal_fx_to_strip(tr, 2, nil), "move normal slot 2 into uninitialized strip auto-creates container")
+
+  vm = core.build_view_model(tr)
+  assert_true(vm.strip.initialized, "strip auto-initialized at slot 0")
+  assert_eq(vm.strip.container_index, 0, "strip container at top_index 0")
+  assert_eq(#vm.strip.children, 1, "strip now has 1 child")
+  assert_eq(vm.strip.children[1].name, "VST3: NormB", "strip child 1 is NormB")
+  assert_eq(vm.strip.children[1].guid, norm_b_guid, "NormB GUID preserved after moving into strip")
+  assert_eq(vm.strip.children[1].wet_percent, 45, "NormB 45% wet preserved after moving into strip")
+
+  assert_eq(#vm.normal_fx, 2, "2 normal FX remain in lower zone")
+  assert_eq(vm.normal_fx[1].name, "VST3: NormA", "normal slot 1 is NormA")
+  assert_eq(vm.normal_fx[2].name, "VST3: NormC", "normal slot 2 is NormC")
+
+  -- 13.2 将下半区 visual_slot 2 (NormC) 拖入上半区 Strip 的指定 1 号子槽位（插入到 NormB 之前）
+  assert_true(core.move_normal_fx_to_strip(tr, 2, 1), "move normal slot 2 (NormC) into strip slot 1")
+  vm = core.build_view_model(tr)
+  assert_eq(#vm.strip.children, 2, "strip now has 2 children")
+  assert_eq(vm.strip.children[1].name, "VST3: NormC", "strip slot 1 is NormC")
+  assert_eq(vm.strip.children[2].name, "VST3: NormB", "strip slot 2 is NormB")
+  assert_eq(#vm.normal_fx, 1, "1 normal FX remains (NormA)")
+  assert_eq(vm.normal_fx[1].name, "VST3: NormA", "remaining normal slot 1 is NormA")
+
+  -- 13.3 将上半区 Strip 子槽位 2 (NormB, 45% wet) 拖回下半区常规 FX 槽位 1 (插入到 NormA 之前)
+  -- 核心边界校验：0 号位 Strip 容器必须稳居 top_index 0，绝不能被挤到 index 1 或被覆盖！
+  local strip_guid = vm.strip.container_guid
+  assert_true(core.move_strip_fx_to_normal(tr, 2, 1), "move strip slot 2 (NormB) out to normal visual_slot 1")
+  vm = core.build_view_model(tr)
+  assert_true(vm.strip.initialized, "strip container still initialized")
+  assert_eq(vm.strip.container_index, 0, "strip container remains at top_index 0 (not displaced)")
+  assert_eq(vm.strip.container_guid, strip_guid, "strip container GUID untouched")
+  assert_false(vm.strip.is_displaced, "strip is not displaced")
+  assert_eq(#vm.strip.children, 1, "1 child remains in strip (NormC)")
+  assert_eq(vm.strip.children[1].name, "VST3: NormC", "remaining strip slot 1 is NormC")
+
+  assert_eq(#vm.normal_fx, 2, "2 normal FX in lower zone")
+  assert_eq(vm.normal_fx[1].name, "VST3: NormB", "normal slot 1 is now NormB")
+  assert_eq(vm.normal_fx[1].top_index, 1, "normal slot 1 is at top_index 1 (after strip container)")
+  assert_eq(vm.normal_fx[1].wet_percent, 45, "NormB kept 45% wet after moving back to normal zone")
+  assert_eq(vm.normal_fx[2].name, "VST3: NormA", "normal slot 2 is NormA")
+  assert_eq(vm.normal_fx[2].top_index, 2, "normal slot 2 is at top_index 2")
+
+  -- 13.4 将上半区最后一个子插件 (NormC) 拖出至下半区末尾 (to_visual_slot = nil)
+  -- 校验 0 号位容器变空后本体依然保留在 top_index 0，绝不被误删
+  assert_true(core.move_strip_fx_to_normal(tr, 1, nil), "move last strip child out to end of normal zone")
+  vm = core.build_view_model(tr)
+  assert_true(vm.strip.initialized, "empty strip container still initialized at slot 0")
+  assert_eq(vm.strip.container_index, 0, "empty strip container still at top_index 0")
+  assert_eq(#vm.strip.children, 0, "strip container is now empty")
+  assert_eq(#vm.normal_fx, 3, "all 3 FX now in lower normal zone")
+  assert_eq(vm.normal_fx[1].name, "VST3: NormB", "normal 1 is NormB")
+  assert_eq(vm.normal_fx[2].name, "VST3: NormA", "normal 2 is NormA")
+  assert_eq(vm.normal_fx[3].name, "VST3: NormC", "normal 3 is NormC")
+
+  -- 13.5 0 号位容器处于偏离状态 (如 top_index = 2) 时的跨区移入与移出，以及非法参数边界拦截
+  -- 当前顶层：[0: Strip, 1: NormB, 2: NormA, 3: NormC] -> 将 Strip 移至 top_index 2：[0: NormB, 1: NormA, 2: Strip, 3: NormC]
+  r.TrackFX_CopyToTrack(tr, 0, tr, 2, true)
+  -- 将位于偏离容器之前的 normal slot 1 (NormB, top_index 0) 移入偏离容器
+  assert_true(core.move_normal_fx_to_strip(tr, 1, nil), "move normal slot 1 (before displaced strip) into displaced strip")
+  vm = core.build_view_model(tr)
+  assert_eq(#vm.strip.children, 1, "displaced strip received NormB")
+  assert_eq(vm.strip.children[1].name, "VST3: NormB", "displaced strip child 1 is NormB")
+  assert_eq(#vm.normal_fx, 2, "2 normal FX remain (NormA, NormC)")
+
+  -- 非法越界参数防御
+  assert_false(core.move_normal_fx_to_strip(tr, 0, 1), "reject normal slot 0")
+  assert_false(core.move_normal_fx_to_strip(tr, 99, 1), "reject normal slot > N")
+  assert_false(core.move_normal_fx_to_strip(tr, 1, 99), "reject target strip slot > M+1")
+  assert_false(core.move_strip_fx_to_normal(tr, 0, 1), "reject strip slot 0")
+  assert_false(core.move_strip_fx_to_normal(tr, 99, 1), "reject strip slot > M")
+  assert_false(core.move_strip_fx_to_normal(tr, 1, 0), "reject target normal visual_slot 0")
+  assert_false(core.move_strip_fx_to_normal(tr, 1, 99), "reject target normal visual_slot > N+1")
+end)
+
+--------------------------------------------------------------------------------
 -- 汇总结果与退出码
 --------------------------------------------------------------------------------
 _G.reaper = host_reaper

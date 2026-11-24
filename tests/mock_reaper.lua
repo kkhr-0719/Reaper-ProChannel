@@ -111,11 +111,31 @@ function mock_reaper.new()
     state.installed_fx = list or {}
   end
 
+  function api.mock_set_resource_file(filename, content)
+    state.resource_files = state.resource_files or {}
+    state.resource_files[tostring(filename or "")] = content
+  end
+
+  function api.mock_read_resource_file(filename)
+    if not state.resource_files then
+      return nil
+    end
+    return state.resource_files[tostring(filename or "")]
+  end
+
   ----------------------------------------------------------------------------
   -- REAPER 标准 API 模拟
   ----------------------------------------------------------------------------
 
+  function api.GetResourcePath()
+    return "/mock/reaper/resource"
+  end
+
   function api.EnumInstalledFX(index)
+    if index == -1 then
+      state.enum_installed_fx_refresh_count = (state.enum_installed_fx_refresh_count or 0) + 1
+      return false, "", ""
+    end
     if type(index) ~= "number" or index < 0 or math.floor(index) ~= index then
       return false, "", ""
     end
