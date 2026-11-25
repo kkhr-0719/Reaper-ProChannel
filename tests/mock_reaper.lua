@@ -123,6 +123,36 @@ function mock_reaper.new()
     return state.resource_files[tostring(filename or "")]
   end
 
+  function api.mock_set_theme_colors(color_map)
+    state.theme_colors = color_map or {}
+  end
+
+  function api.ColorToNative(r, g, b)
+    local br = math.max(0, math.min(255, math.floor(tonumber(r) or 0)))
+    local bg = math.max(0, math.min(255, math.floor(tonumber(g) or 0)))
+    local bb = math.max(0, math.min(255, math.floor(tonumber(b) or 0)))
+    return (bb << 16) | (bg << 8) | br
+  end
+
+  function api.ColorFromNative(native_col)
+    local raw = math.floor(tonumber(native_col) or 0) & 0xFFFFFF
+    local r = raw & 0xFF
+    local g = (raw >> 8) & 0xFF
+    local b = (raw >> 16) & 0xFF
+    return r, g, b
+  end
+
+  function api.GetThemeColor(ini_key, _flags)
+    if not state.theme_colors or type(ini_key) ~= "string" then
+      return -1
+    end
+    local val = state.theme_colors[ini_key]
+    if type(val) ~= "number" then
+      return -1
+    end
+    return val
+  end
+
   ----------------------------------------------------------------------------
   -- REAPER 标准 API 模拟
   ----------------------------------------------------------------------------

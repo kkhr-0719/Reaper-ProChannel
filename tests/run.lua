@@ -23,6 +23,7 @@ package.path = table.concat({
 
 local mock_reaper = require("mock_reaper")
 local core = require("core")
+local theme = require("theme")
 
 local output_lines = {}
 local function log_line(msg)
@@ -1079,6 +1080,146 @@ run_test("v0.2.0 上下双区跨区互相拖拽 FX（常规槽<->0 号位 Strip 
   assert_false(core.move_strip_fx_to_normal(tr, 99, 1), "reject strip slot > M")
   assert_false(core.move_strip_fx_to_normal(tr, 1, 0), "reject target normal visual_slot 0")
   assert_false(core.move_strip_fx_to_normal(tr, 1, 99), "reject target normal visual_slot > N+1")
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 14 (v0.2.0 UI)：theme.lua 颜色转换、WCAG 对比度安全兜底、浅色/深色宿主主题自适应与样式栈平衡
+--------------------------------------------------------------------------------
+run_test("v0.2.0 theme.lua 颜色打包/解包、GetThemeColor 转换、WCAG 对比度兜底与 ImGui 样式压弹栈平衡", function(r)
+  -- 14.1 RGBA 0xRRGGBBAA 打包、解包、边界夹紧与混合
+  local col = theme.rgba(229, 163, 59, 255)
+  assert_eq(col, 0xE5A33BFF, "theme.rgba packs 0xRRGGBBAA accurately")
+  local ur, ug, ub, ua = theme.unpack_rgba(col)
+  assert_eq(ur, 229, "unpack_rgba R")
+  assert_eq(ug, 163, "unpack_rgba G")
+  assert_eq(ub, 59, "unpack_rgba B")
+  assert_eq(ua, 255, "unpack_rgba A")
+
+  local clamped_col = theme.rgba(-20, 300, 128, -5)
+  local cr, cg, cb, ca = theme.unpack_rgba(clamped_col)
+  assert_eq(cr, 0, "clamped negative R to 0")
+  assert_eq(cg, 255, "clamped >255 G to 255")
+  assert_eq(cb, 128, "kept valid B 128")
+  assert_eq(ca, 0, "clamped negative A to 0")
+
+  local alpha_col = theme.with_alpha(0xE5A33BFF, 0x80)
+  assert_eq(alpha_col, 0xE5A33B80, "with_alpha replaces alpha channel")
+
+  local mid_col = theme.blend_rgba(0x000000FF, 0xFFFFFFFF, 0.5)
+  local mr, mg, mb, ma = theme.unpack_rgba(mid_col)
+  assert_eq(mr, 128, "blend_rgba midpoint R")
+  assert_eq(mg, 128, "blend_rgba midpoint G")
+  assert_eq(mb, 128, "blend_rgba midpoint B")
+  assert_eq(ma, 255, "blend_rgba midpoint A")
+
+  -- 14.2 REAPER native_to_rgba 转换与非法值拦截
+  assert_eq(theme.native_to_rgba(-1, 255, r), nil, "native_to_rgba(-1) returns nil")
+  assert_eq(theme.native_to_rgba(nil, 255, r), nil, "native_to_rgba(nil) returns nil")
+  assert_eq(theme.native_to_rgba(0 / 0, 255, r), nil, "native_to_rgba(NaN) returns nil")
+
+  local native_rgb = r.ColorToNative(0x24, 0x68, 0xAC)
+  assert_eq(theme.native_to_rgba(native_rgb, 0xFF, r), 0x2468ACFF, "native_to_rgba converts via ColorFromNative to 0xRRGGBBAA")
+  -- 无 ColorFromNative 时位掩码回退
+  assert_eq(theme.native_to_rgba(native_rgb, 0xCC, {}), 0x2468ACCC, "native_to_rgba fallback without ColorFromNative")
+
+  -- 14.3 相对亮度、WCAG 对比度与 ensure_contrast 安全兜底
+  assert_eq(theme.relative_luminance(0x000000FF), 0.0, "pure black luminance == 0.0")
+  assert_true(math.abs(theme.relative_luminance(0xFFFFFFFF) - 1.0) < 1e-6, "pure white luminance == 1.0")
+  assert_true(math.abs(theme.contrast_ratio(0x000000FF, 0xFFFFFFFF) - 21.0) < 1e-4, "black vs white contrast == 21.0")
+  assert_false(theme.is_light_color(0x16191FFF), "Studio Dark window_bg is dark")
+  assert_true(theme.is_light_color(0xF0F2F5FF), "Bright white/light-gray bg is light")
+
+  -- 模拟第三方位图皮肤浅底配浅字（对比度严重不足）：ensure_contrast 必须自动收敛至高对比深色文字
+  local fixed_on_light = theme.ensure_contrast(0xF2F4F8FF, 0xEAEAEAFF, 4.5)
+  assert_true(theme.contrast_ratio(0xF2F4F8FF, fixed_on_light) >= 4.5, "ensure_contrast rescues unreadable light-on-light text")
+
+  -- 模拟第三方位图皮肤深底配深字（对比度严重不足）：ensure_contrast 必须自动收敛至高对比浅色文字
+  local fixed_on_dark = theme.ensure_contrast(0x181B20FF, 0x20242BFF, 4.5)
+  assert_true(theme.contrast_ratio(0x181B20FF, fixed_on_dark) >= 4.5, "ensure_contrast rescues unreadable dark-on-dark text")
+
+  -- 14.4 Studio Dark 默认调色板与双区差异化校验
+  local studio_pal = theme.resolve_palette({ follow_host_theme = false }, r)
+  assert_eq(studio_pal.mode, "studio_dark", "default palette mode is studio_dark")
+  assert_false(studio_pal.is_light, "studio_dark is_light == false")
+  assert_true(studio_pal.strip_accent ~= studio_pal.normal_accent, "0-slot strip and normal zone have distinct accent colors")
+  assert_true(studio_pal.row_bg_strip ~= studio_pal.row_bg_normal, "0-slot strip and normal zone have distinct row background colors")
+  assert_true(theme.contrast_ratio(studio_pal.window_bg, studio_pal.text) >= 4.5, "studio_dark text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(studio_pal.row_bg_strip, studio_pal.row_text) >= 4.5, "studio_dark strip row text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(studio_pal.row_bg_normal, studio_pal.row_text) >= 4.5, "studio_dark normal row text contrast >= 4.5")
+
+  -- 14.5 明亮白 / 浅灰底浅色宿主主题自适应（含第三方 PNG 皮肤缺失文字色兜底）
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(240, 242, 245),   -- 明亮浅灰白背景
+    col_main_text2 = r.ColorToNative(235, 238, 240), -- 故意模拟损坏的浅色文字以触发对比度兜底
+  })
+  local light_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(light_pal.mode, "host_light", "detected bright white/light-gray host theme as host_light")
+  assert_true(light_pal.is_light, "host_light is_light == true")
+  assert_true(theme.contrast_ratio(light_pal.window_bg, light_pal.text) >= 4.5, "host_light window_bg vs text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(light_pal.row_bg_strip, light_pal.row_text) >= 4.5, "host_light strip card vs row_text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(light_pal.row_bg_normal, light_pal.row_text) >= 4.5, "host_light normal card vs row_text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(light_pal.button, light_pal.text) >= 4.5, "host_light button vs text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(light_pal.popup_bg, light_pal.text) >= 4.5, "host_light popup vs text contrast >= 4.5")
+
+  -- 14.6 深色宿主主题自适应与缺失主题色回退
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(34, 38, 44),
+    col_main_text2 = -1, -- 缺失文字色
+  })
+  local dark_host_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(dark_host_pal.mode, "host_dark", "detected dark host theme as host_dark")
+  assert_false(dark_host_pal.is_light, "host_dark is_light == false")
+  assert_true(theme.contrast_ratio(dark_host_pal.window_bg, dark_host_pal.text) >= 4.5, "host_dark fallback text contrast >= 4.5")
+
+  r.mock_set_theme_colors({})
+  local fallback_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(fallback_pal.mode, "studio_dark", "falls back to studio_dark when GetThemeColor returns -1 for all keys")
+
+  -- 14.7 严格模拟 docs/imgui.lua __index 报错元表的 theme.push / theme.pop 栈平衡测试
+  local color_stack = 0
+  local var_stack = 0
+  local mock_imgui = setmetatable({
+    Col_Text = 1,
+    Col_WindowBg = 2,
+    Col_Button = 3,
+    StyleVar_WindowRounding = 10,
+    StyleVar_WindowPadding = 20,
+    PushStyleColor = function(_ctx, col_idx, rgba_val)
+      assert_true(type(col_idx) == "number", "PushStyleColor col_idx is number")
+      assert_true(type(rgba_val) == "number", "PushStyleColor rgba_val is number")
+      color_stack = color_stack + 1
+    end,
+    PopStyleColor = function(_ctx, cnt)
+      color_stack = color_stack - (tonumber(cnt) or 1)
+    end,
+    PushStyleVar = function(_ctx, var_idx, v1, v2)
+      assert_true(type(var_idx) == "number", "PushStyleVar var_idx is number")
+      assert_true(type(v1) == "number", "PushStyleVar v1 is number")
+      if var_idx == 10 then
+        assert_eq(v2, nil, "scalar StyleVar_WindowRounding receives 1 float arg")
+      elseif var_idx == 20 then
+        assert_true(type(v2) == "number", "Vec2 StyleVar_WindowPadding receives 2 float args")
+      end
+      var_stack = var_stack + 1
+    end,
+    PopStyleVar = function(_ctx, cnt)
+      var_stack = var_stack - (tonumber(cnt) or 1)
+    end,
+  }, {
+    __index = function(_, key)
+      error("strict docs/imgui.lua metatable violation: unguarded access to field " .. tostring(key))
+    end,
+  })
+
+  local pushed_cols, pushed_vars = theme.push("mock_ctx", mock_imgui, { follow_host_theme = false }, r)
+  assert_eq(pushed_cols, 3, "pushed exact 3 available Col_* constants via rawget")
+  assert_eq(pushed_vars, 2, "pushed exact 2 available StyleVar_* constants via rawget")
+  assert_eq(color_stack, 3, "color_stack depth == 3")
+  assert_eq(var_stack, 2, "var_stack depth == 2")
+
+  theme.pop("mock_ctx", mock_imgui, pushed_cols, pushed_vars)
+  assert_eq(color_stack, 0, "color_stack balanced to 0 after theme.pop")
+  assert_eq(var_stack, 0, "var_stack balanced to 0 after theme.pop")
 end)
 
 --------------------------------------------------------------------------------
