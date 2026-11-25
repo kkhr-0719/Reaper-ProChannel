@@ -4,24 +4,24 @@
 - **项目简称**：`ReaPCh`（Reaper ProChannel）
 - **前置环境**：
   - `docs/imgui.lua`：已确认，本机 ReaImGui 动态垫片（`reaper_imgui-x64` `v0.10.0.5`），支持 `require 'imgui' '0.10'`（向下兼容 `'0.9'`）；垫片在加载时已对 `flags & 1 ~= 0` 的枚举常量预求值，且遵循 ReaImGui 0.9/0.10 规范仅在 `ImGui.Begin` / `ImGui.BeginChild` 返回 `visible == true` 时调用 `ImGui.End` / `ImGui.EndChild`。
-  - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；现已扩展至 **16 组**边界与 UI 集成单元测试用例（新增用例 14b 白/浅灰+樱花粉宿主 HSL 色相保持与第三方位图占位黑容错、用例 15 严格 `docs/imgui.lua` 元表下 `ui.draw` 全流程栈平衡与 UTF-8 截断，以及用例 16 中灰 WCAG 兜底、极淡粉红与深色宿主完整对比度、MIX 旋钮拖拽/Shift 微调/双击 Undo 状态机、超窄 Split Dock 与拖拽 Tooltip/悬停防穿透回归）。
+  - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；现已扩展至 **17 组**边界与 UI 集成单元测试用例（含用例 14b 白/浅灰+樱花粉宿主 HSL 色相保持与第三方位图占位黑容错、用例 15 严格 `docs/imgui.lua` 元表下 `ui.draw` 全流程栈平衡与 UTF-8 截断、用例 16 中灰 WCAG 兜底/MIX 旋钮状态机/超窄窗与拖拽 Tooltip 防穿透，以及用例 17 全灰度 0..255 边界中灰与中浅灰完整表面对比度、`Col_DragDropTarget` + `AcceptNoDrawDefaultRect` 去默认黄框与顶层 DnD Z-Order 顺序、旋钮 1.5px 防手抖/跨行 Hover 隔离、拖拽取消防误开窗及 120px 极窄按钮收敛回归）。
   - **Git 仓库状态**：当前在 `feat/v0.2.1-ui-polish` 分支开发提交（从本地 `feat/v0.2.0-core-loop` 切出），未获用户验收与明确指令前不合并 `main`、不执行 `git push`。
 
 ## 已完成（`v0.2.1` UI 调试、缺陷修复与质感精修）
 - **`src/theme.lua`（HSL 宿主彩色点缀承接、浅色主题清爽层次、极端中灰数学兜底与完整 ImGui 控件染色）**：
   - **纯 Lua RGB ↔ HSL 色相保持算法（`theme.rgb_to_hsl` / `hsl_to_rgb` / `adapt_vivid_accent`）**：在多组 REAPER 主题高亮键（`col_tcp_bgsel`、`col_seltrack2`、`col_seltrack`、`col_main_hilite`、`col_tl_bgsel`、`selitem_dot` 等）中优先捕获有效彩色点缀（含极淡樱花粉 `L > 0.85, spread >= 10, S >= 0.22`），仅沿 HSL 亮度轴调整至满足对比度门槛并优雅控制饱和度上限（浅底 `0.78` / 深底 `0.82`），彻底杜绝浅色粉红变脏发灰、过曝刺眼或回退硬编码冷蓝的问题；当宿主色相落入暖琥珀区（`20°..52°`）时自动错开 0 号位 Strip 强调色以保证双区一眼可辨。
-  - **WCAG 2.1 全色域数学兜底与 `host_dark` 完整性补齐**：`theme.ensure_contrast` 与 `theme.on_accent_text` 在中等灰背景（`L ≈ 0.16..0.21`）柔和锚点无法满足 `>= 4.5` 时自动升级至纯黑/纯白锚点，确保全 sRGB 色域 100% 达标；补齐 `host_dark` 下 `row_bg_open` / `row_bg_strip` / `knob_text` 对比度校验与 `title_bg_collapsed` / `resize_grip*` 跟随宿主强调色。
+  - **WCAG 2.1 全色域同侧数学兜底与独立标题语义色**：将 `theme.LIGHT_LUMINANCE_THRESHOLD` 精确校准至 WCAG 黑白等对比度平衡点 `0.179`，并通过 `clamp_surface_luminance` 与 `ensure_contrast_all` 约束所有派生背景稳居同侧，彻底根治中灰宿主皮肤（`L ∈ (0.179, 0.22]`）下链式对比度翻转与中浅灰皮肤（如 `RGB(145,145,148)`）双区标题栏对比度跌破 2.1 的缺陷；新增独立 `strip_zone_title` / `normal_zone_title` 与 `popup_title_strip` / `popup_title_normal` 语义色并补齐 `host_dark` 下 `master_off_text` / `row_bg_hover` / `header_bar_bg` 校验（经全灰度 `0..255` × 5 强调色共 1,280 套调色板数学验证 0 失败）。
   - **第三方 PNG 位图浅色皮肤占位黑容错**：当 `col_main_bg2` 为极暗占位黑（`L < 0.02`）而 `col_tcp_bg` 与 `col_main_editbk` 均为明亮浅色（`L > 0.45`）时，自动采用 `col_tcp_bg` 判定为 `host_light`，避免误判为纯黑皮肤。
-  - **完整 ImGui 原生控件配色栈补齐 + 零每帧分配缓存**：补全 `Col_Scrollbar*`、`Col_Tab*`（`rawget` 优先 0.10 `Col_TabSelected`/`Col_TabDimmed` 回退 0.9 `Col_TabActive`/`Col_TabUnfocused` 且双键并存不重复压栈）、`Col_TextSelectedBg`、`Col_ResizeGrip*`、`Col_DockingPreview`、`Col_TitleBgCollapsed` 等；默认 Studio Dark 与宿主主题均采用签名/实例缓存（`theme.clear_host_cache()`），兼顾零每帧 GC 与换肤即时响应。
+  - **完整 ImGui 原生控件配色栈补齐 + 零每帧分配缓存**：补全 `Col_Scrollbar*`、`Col_Tab*`（`rawget` 优先 0.10 `Col_TabSelected`/`Col_TabDimmed` 回退 0.9 `Col_TabActive`/`Col_TabUnfocused` 且双键并存不重复压栈）、`Col_TextSelectedBg`、`Col_ResizeGrip*`、`Col_DockingPreview`、`Col_TitleBgCollapsed`、`Col_DragDropTarget` 等；`theme.pop` 自动清空 `theme._active_palette` 防止帧外读到过期主题；默认 Studio Dark 与宿主主题均采用签名/实例缓存（`theme.clear_host_cache()`），兼顾零每帧 GC 与换肤即时响应。
 - **`src/ui.lua` & `src/main.lua`（实机级布局修复、防溢出截断、交互手感与 Split Dock 兼容）**：
-  - **彻底消除单行 FX 卡片 `Selectable` 脏框、超窄横滚与长插件名/百分比溢出**：将单行 FX 卡片升级为精确 4 段式像素对齐布局（左侧 3px 色条 + 18px Bypass LED + 弹性插件名热区 + 动态宽度 MIX 旋钮 + 20px 硬件风格 `×` 移除钮），新增按 UTF-8 字符边界安全截断的 `fit_text_with_ellipsis` 与 `DrawList_PushClipRect/PopClipRect` 双重防溢出；宽度下限放宽至 `120px` 消除窄窗横滚条，并在超窄 Split Dock（`< 170px`）自动切换 MIX 旋钮为纯圆弧紧凑模式（悬停仍显示精确百分比 Tooltip），常规宽度下为旋钮外环与 `"100%"` 留足 `3px` 呼吸间距；叠加 `IsWindowHovered` 阻断弹窗/菜单遮挡时背后行卡片误亮。
+  - **彻底消除单行 FX 卡片 `Selectable` 脏框、超窄横滚与长插件名/百分比溢出**：将单行 FX 卡片升级为精确 4 段式像素对齐布局（左侧 3px 色条 + 18px Bypass LED + 弹性插件名热区 + 动态宽度 MIX 旋钮 + 20px 硬件风格 `×` 移除钮），新增按 UTF-8 字符边界安全截断的 `fit_text_with_ellipsis` 与 `DrawList_PushClipRect/PopClipRect` 双重防溢出；宽度下限放宽至 `120px` 消除窄窗横滚条，并在窄 Split Dock（`< 196px`）自动切换 MIX 旋钮为纯圆弧紧凑模式优先保证插件名可读（悬停仍显示精确百分比 Tooltip），常规宽度下为旋钮外环与 `"100%"` 留足呼吸间距；叠加 `IsWindowHovered` 阻断弹窗/菜单遮挡穿透，并在拖拽某行 MIX 旋钮期间通过 `ui._active_knob_row_id` 抑制经过其他行的误高亮；无选中轨道提示亦自动换行防横滚。
   - **`BeginGroup` 垂直居中按钮与固定吸顶轨道栏**：新增 `render_centered_button` 利用 `BeginGroup`/`EndGroup` 隔离 `SetCursorPosY`，彻底消除标题栏/轨道栏/偏离卡片底部 `+2px` 幽灵行距漂移并规避 Dear ImGui 1.91 越界断言；顶部 `TRK` 轨道栏固定吸顶且超长轨道名自动截断（绝不挤出右上角 `⚙` 按钮）；下方双区置于无边框透明 `BeginChild("##reapch_body_scroll", 0, 0)` 中流畅滚动，完整保留 REAPER / ReaImGui 原生 Split Dock；通过 `ui._pending_open_fx_browser` 在顶层主窗口 ID 栈统一调用 `OpenPopup`，彻底避免 `BeginChild` 子作用域导致点击 `+ 添加` 打不开弹窗的 Bug。
-  - **`+ 添加` 弹窗排版锁宽精修**：弹窗列表 `BeginChild` 自动启用 `ChildFlags_Borders`（0.10）/ `ChildFlags_Border`（0.9）清晰描边，右对齐 `[+ 自定义分组]` 按钮至 `390px` 边缘，并对自定义分组编辑器提示与空态提示启用 `PushTextWrapPos`/`PopTextWrapPos` 自动换行，杜绝展开分组管理时弹窗横向撑宽变形。
-  - **双区标题栏、三态拖放反馈与拖拽 Tooltip 抑制**：消除原标题栏 `Selectable` 丑框与窄窗按钮重叠，将 0 号位整区总 Bypass 升级为紧凑硬件胶囊开关（`ON` / `OFF`），将 MCP 偏离提示条升级为带 `warning_bg` / `warning_border` 的卡片；全行 4 段与标题栏/底部区均挂载 `attach_zone_drop_target` 并区分 `row` / `header` / `tail` 三态视觉反馈（标题栏仅框选高亮不误画 1 号位顶线，底部追加条高亮顶边插入线，同时拦截非 ReaPCh 外源拖拽误触发）；拖拽 FX 期间全局抑制 LED / 旋钮 / `×` / 胶囊 / 轨道栏的悬停 Tooltip 与光标闪烁，彻底杜绝污染 DragDropSource 预览窗；轨道切换自动清理 `_wet_*` 旋钮拖拽缓存。
-  - **MIX 圆弧旋钮渲染与手感增强**：采用 28 段背景圆弧与按值自适应分段有效圆弧提升 HiDPI 顺滑度，新增悬停/拖拽外环高亮、拖拽态 `MouseCursor_ResizeNS` 上下调节光标与右对齐百分比读数，保留上下拖拽实时调参不刷 Undo、`Shift` 4 倍微调、松手沿用 `pre_undo_wet_0_to_1` 基线一步 Undo、双击重置 `100%`（已是 `100%` 时不产生空 Undo）。
+  - **`+ 添加` 弹窗排版锁宽精修**：弹窗列表 `BeginChild` 自动启用 `ChildFlags_Borders`（0.10）/ `ChildFlags_Border`（0.9）清晰描边，右对齐 `[+ 自定义分组]` 按钮至 `390px` 边缘，新建分组输入框支持 `Enter` 回车快捷提交，并对顶部统计文字、自定义分组编辑器提示与树节点空组/截断提示全面启用 `PushTextWrapPos`/`PopTextWrapPos` 自动换行，杜绝弹窗横向撑宽或列表内横滚条。
+  - **双区标题栏、去默认黄框顶层三态拖放反馈与拖拽 Tooltip 抑制**：消除原标题栏 `Selectable` 丑框与超窄 Split Dock 按钮破框（`< 170px` 自动切紧凑 `+` 按钮、偏离卡 `< 160px` 自动切紧凑 `归位`、未初始化按钮按宽收敛文案），将 0 号位整区总 Bypass 升级为紧凑硬件胶囊开关（`ON` / `OFF`），将 MCP 偏离提示条升级为带 `warning_bg` / `warning_border` 的卡片；`attach_zone_drop_target` 探测传入 `DragDropFlags_AcceptNoDrawDefaultRect` 屏蔽 Dear ImGui 默认亮黄小框，并通过 `defer_draw` 将整行与标题栏的高亮底色/插入线延迟至全部子控件绘制完毕后的最顶层统一绘制，彻底消灭 Z-Order 遮挡撕裂；拖拽取消回到自身松手时自动拦截防误弹插件悬浮窗；拖拽 FX 期间全局抑制 LED / 旋钮 / `×` / 胶囊 / 轨道栏的悬停 Tooltip 与光标闪烁，彻底杜绝污染 DragDropSource 预览窗；轨道切换自动清理 `_wet_*` 旋钮拖拽缓存。
+  - **MIX 圆弧旋钮渲染与手感增强**：采用 28 段背景圆弧与按值自适应分段有效圆弧提升 HiDPI 顺滑度，新增悬停/拖拽外环高亮、拖拽态 `MouseCursor_ResizeNS` 上下调节光标与右对齐百分比读数，引入 `1.5px` 累计位移防手抖启动阈值（免疫双击前轻微手抖产生垃圾 Undo，同时不吞真实拖拽像素），保留上下拖拽实时调参不刷 Undo、`Shift` 4 倍微调、松手沿用 `pre_undo_wet_0_to_1` 基线一步 Undo、双击重置 `100%`（已是 `100%` 时不产生空 Undo）。
   - **`src/main.lua`**：将 `ConfigFlags_DockingEnable` 改为 `rawget` 探测，统一全项目防 `__index` 抛错规范。
-- **`tests/run.lua`（扩展至 16 组单元测试）**：
-  - 保留全部前 15 组用例，新增用例 16：覆盖中灰 WCAG 4.5 数学兜底、极淡樱花粉 (`spread=12`) 识别、不手动清缓存下的实时换肤刷新、`host_dark` `row_bg_open`/`knob_text` 对比度、`Col_TabSelected`/`Col_TabActive` 防重复压栈、MIX 旋钮完整拖拽 + `Shift` 微调 + 松手单步 Undo + 双击重置 100% 状态机、超窄 Split Dock (`140px`) + 展开自定义分组弹窗栈平衡、弹窗遮挡行悬停防穿透及拖拽期间零 Tooltip 污染校验。
+- **`tests/run.lua`（扩展至 17 组单元测试）**：
+  - 保留全部前 16 组用例，新增用例 17：覆盖中灰 (`122`) / 中浅灰 (`145`) / 暗灰+亮强调色全表面 WCAG `>= 4.5` 与独立标题栏/弹窗标题对比度、`Col_DragDropTarget` 压栈与 `theme.pop` 清空 `_active_palette`、`DragDropFlags_AcceptNoDrawDefaultRect` 去默认黄框与顶层 DnD Z-Order 顺序验证、拖拽取消防误开窗、旋钮 `1px` 防手抖不写垃圾 Undo + 跨行 Hover 隔离，以及 `120px` 极窄 Split Dock 紧凑 `+` 按钮与换行栈平衡校验。
 
 ## 已完成（`v0.2.0` 核心逻辑与朴素操作闭环 + 实机反馈增强）
 - **`src/core.lua`（纯逻辑层扩展，零 ImGui 依赖）**：
@@ -63,8 +63,8 @@
    - 不强制默认内置；作为低优先级可选方案（Opt-in），仅在用户显式开启时按需调用 REAPER 原厂自带的 `JS: Volume Adjustment` 联动 dB 参数。
 
 ## 下一步
-1. 在 REAPER 7 内运行 `tests/run.lua` 实机验收全部 **16 组**单元测试，并在 `src/main.lua` 中实机检验：
-   - 浅色白/浅灰 + 粉红自定义皮肤下开启右上角 `⚙ -> 跟随 REAPER 宿主主题配色 (实验性)` 的玫瑰粉强调色承接、卡片描边层次、滚动条/Dock 标签协调度、实时换肤刷新与文字对比度；
-   - 默认 Studio Dark 主题与 Split Dock 窄窗（如 `140px` 超窄纯旋钮模式与 `220px~280px` 常规窄窗）下的固定吸顶轨道栏、UTF-8 长名截断、硬件胶囊总 Bypass (`ON`/`OFF`)、单行 MIX 圆弧旋钮与整行无死角三态跨区拖拽反馈（且拖拽期间无 Tooltip 污染、弹窗遮挡时不穿透高亮）；
-   - 点击双区 `+ 添加` 弹窗（含描边列表、分组高亮、右对齐 `[+ 自定义分组]` 与展开自定义分组管理时 `390px` 稳态锁宽）。
+1. 在 REAPER 7 内运行 `tests/run.lua` 实机验收全部 **17 组**单元测试，并在 `src/main.lua` 中实机检验：
+   - 浅色白/浅灰 + 粉红自定义皮肤、中浅灰皮肤与默认深色皮肤间实时切换，核查玫瑰粉强调色承接、双区标题栏与卡片对比度、滚动条/Dock 标签协调度；
+   - 默认 Studio Dark 主题与 Split Dock 窄窗（如 `120px~165px` 极窄紧凑 `+` / 纯旋钮模式与 `220px~310px` 常规窄窗）下的固定吸顶轨道栏、UTF-8 长名截断、硬件胶囊总 Bypass (`ON`/`OFF`)、单行 MIX 圆弧旋钮（防手抖与跨行隔离）及无默认黄框、顶层三态跨区拖拽反馈；
+   - 点击双区 `+ 添加` 弹窗（含描边列表、分组高亮、右对齐 `[+ 自定义分组]`、回车新建分组与 `390px` 稳态锁宽）。
 2. 待用户验收 `v0.2.1` UI 精修并明确下令后再决定是否合并/推送或推进 `v0.3.0` 0 号位 Channel Strip 预设保存与加载体系。

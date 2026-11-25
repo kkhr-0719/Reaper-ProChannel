@@ -12,7 +12,9 @@ local theme = {}
 theme.DEFAULT_WINDOW_WIDTH = 310
 theme.DEFAULT_WINDOW_HEIGHT = 640
 theme.MIN_CONTRAST_RATIO = 4.5
-theme.LIGHT_LUMINANCE_THRESHOLD = 0.22
+-- WCAG 2.1 纯黑 (L=0) 与纯白 (L=1) 对比度精确几何平衡点为 sqrt(0.0525) - 0.05 ≈ 0.1791；
+-- 以 0.179 为界可保证：L > 0.179 用深色字恒 >= 4.58，L <= 0.179 用浅色字恒 >= 4.58，杜绝中灰区间对比度冲突。
+theme.LIGHT_LUMINANCE_THRESHOLD = 0.179
 
 theme._active_palette = nil
 theme._studio_dark_cache = nil
@@ -261,6 +263,14 @@ function theme.ensure_contrast(bg_rgba, fg_rgba, min_ratio)
   return anchor
 end
 
+local function is_vivid_rgb(r, g, b)
+  local spread = math.max(r, g, b) - math.min(r, g, b)
+  local h, s, l = theme.rgb_to_hsl(r, g, b)
+  local is_pastel_tint = (l > 0.85 and spread >= 10 and s >= 0.22 and l <= 0.98)
+  local is_vivid = is_pastel_tint or (spread >= 14 and s >= 0.18 and l >= 0.05 and l <= 0.97)
+  return is_vivid, h, s, l
+end
+
 --- 保留色相与通透饱和度的强调色亮度适配算法：
 --- 若 accent_rgba 具备有效彩度（如浅色皮肤中的粉红点缀），仅沿 HSL 亮度轴收敛以满足对比度，避免向纯黑混合发灰变脏；
 --- 若 accent_rgba 缺失或无彩度（灰白/纯黑），返回 nil 交由优雅默认色接管。
@@ -269,10 +279,8 @@ function theme.adapt_vivid_accent(bg_rgba, accent_rgba, min_ratio, is_light_bg)
     return nil, nil
   end
   local r, g, b, a = theme.unpack_rgba(accent_rgba)
-  local spread = math.max(r, g, b) - math.min(r, g, b)
-  local h, s, l = theme.rgb_to_hsl(r, g, b)
-  local is_pastel_tint = (l > 0.85 and spread >= 10 and s >= 0.22 and l <= 0.98)
-  if not is_pastel_tint and (spread < 14 or s < 0.16 or l < 0.05 or l > 0.97) then
+  local is_vivid, h, s, l = is_vivid_rgb(r, g, b)
+  if not is_vivid then
     return nil, nil
   end
 
@@ -380,13 +388,18 @@ function theme.get_studio_dark_palette()
     -- 双区差异化卡片与强调色（上半区 0 号位暖琥珀金 vs 下半区常规槽录音室冷蓝）
     strip_zone_bg          = 0x22201DFF,
     strip_zone_border      = 0x4A3B26FF,
+    strip_zone_title       = 0xE8B054FF,
     strip_accent           = 0xE5A33BFF,
     strip_accent_dim       = 0x6E5329FF,
 
     normal_zone_bg         = 0x1B2029FF,
     normal_zone_border     = 0x2B384EFF,
+    normal_zone_title      = 0x72A7FAFF,
     normal_accent          = 0x4E8DF5FF,
     normal_accent_dim      = 0x2C4978FF,
+
+    popup_title_strip      = 0xE8B054FF,
+    popup_title_normal     = 0x72A7FAFF,
 
     -- 上半区总 Bypass 胶囊开关
     master_on_bg           = 0xD99226FF,
@@ -495,16 +508,62 @@ local function query_vivid_host_accent(r_api)
           fallback_rgba = rgba
         end
         local r, g, b = theme.unpack_rgba(rgba)
-        local spread = math.max(r, g, b) - math.min(r, g, b)
-        local _, s, l = theme.rgb_to_hsl(r, g, b)
-        local is_pastel_tint = (l > 0.85 and spread >= 10 and s >= 0.22 and l <= 0.98)
-        if is_pastel_tint or (spread >= 14 and s >= 0.18 and l >= 0.05 and l <= 0.97) then
+        if is_vivid_rgb(r, g, b) then
           return rgba, table.concat(sig_parts, ",")
         end
       end
     end
   end
   return fallback_rgba, table.concat(sig_parts, ",")
+end
+
+local function clamp_surface_luminance(rgba, is_light_mode)
+  local _, _, _, a = theme.unpack_rgba(rgba)
+  if is_light_mode then
+    if theme.relative_luminance(rgba) >= 0.185 then
+      return rgba
+    end
+    for step = 1, 10 do
+      local cand = theme.with_alpha(theme.blend_rgba(rgba, 0xFFFFFFFF, step / 10.0), a)
+      if theme.relative_luminance(cand) >= 0.185 then
+        return cand
+      end
+    end
+    return theme.with_alpha(0x767A82FF, a)
+  else
+    if theme.relative_luminance(rgba) <= 0.172 then
+      return rgba
+    end
+    for step = 1, 10 do
+      local cand = theme.with_alpha(theme.blend_rgba(rgba, 0x14171EFF, step / 10.0), a)
+      if theme.relative_luminance(cand) <= 0.172 then
+        return cand
+      end
+    end
+    return theme.with_alpha(0x14171EFF, a)
+  end
+end
+
+--- 在一组同侧背景表面上选取最严格背景并收敛前景色，数学上保证对所有表面均满足 >= min_ratio
+local function ensure_contrast_all(surfaces, fg_rgba, min_ratio, is_light_mode)
+  local hardest_bg = surfaces[1]
+  local hardest_lum = theme.relative_luminance(hardest_bg)
+  for i = 2, #surfaces do
+    local s = surfaces[i]
+    local lum = theme.relative_luminance(s)
+    if (is_light_mode and lum < hardest_lum) or ((not is_light_mode) and lum > hardest_lum) then
+      hardest_bg = s
+      hardest_lum = lum
+    end
+  end
+  local result = theme.ensure_contrast(hardest_bg, fg_rgba, min_ratio)
+  -- 二次兜底校验：确保所有表面无一遗漏
+  for i = 1, #surfaces do
+    if theme.contrast_ratio(surfaces[i], result) < min_ratio then
+      result = theme.ensure_contrast(surfaces[i], result, min_ratio)
+    end
+  end
+  return result
 end
 
 --- 清除宿主配色缓存（测试或强制刷新用）
@@ -583,6 +642,7 @@ function theme.build_host_palette(reaper_api)
     local card_base = (bg_lum > 0.85)
       and theme.blend_rgba(host_bg, 0xEDF0F5FF, 0.72)
       or theme.blend_rgba(host_bg, pure_white, 0.72)
+    card_base = clamp_surface_luminance(card_base, true)
 
     -- 优先通过 HSL 色相保持算法提取宿主彩色强调色（例如浅色粉红皮肤 -> 玫瑰粉强调色）
     local adapted_accent, accent_hue = theme.adapt_vivid_accent(card_base, host_accent_raw, 3.4, true)
@@ -597,12 +657,12 @@ function theme.build_host_palette(reaper_api)
     strip_accent = theme.ensure_contrast(card_base, strip_accent, 3.4)
 
     -- 清爽现代浅色卡片表面：极轻微的色相呼吸，靠清晰 1px 描边与左侧 3px 强调色条建立层级
-    local row_strip_bg = theme.blend_rgba(card_base, strip_accent, 0.045)
-    local row_normal_bg = theme.blend_rgba(card_base, normal_accent, 0.030)
+    local row_strip_bg = clamp_surface_luminance(theme.blend_rgba(card_base, strip_accent, 0.045), true)
+    local row_normal_bg = clamp_surface_luminance(theme.blend_rgba(card_base, normal_accent, 0.030), true)
     local row_border_strip = theme.blend_rgba(card_base, strip_accent, 0.24)
     local row_border_normal = theme.blend_rgba(card_base, slate_border, 0.55)
-    local row_hover_bg = theme.blend_rgba(card_base, normal_accent, 0.10)
-    local row_open_bg = theme.blend_rgba(card_base, normal_accent, 0.16)
+    local row_hover_bg = clamp_surface_luminance(theme.blend_rgba(card_base, normal_accent, 0.10), true)
+    local row_open_bg = clamp_surface_luminance(theme.blend_rgba(card_base, normal_accent, 0.16), true)
 
     local frame_bg = host_edit_bg
       and theme.blend_rgba(host_bg, host_edit_bg, 0.65)
@@ -611,21 +671,36 @@ function theme.build_host_palette(reaper_api)
     if theme.contrast_ratio(host_bg, frame_bg) < 1.06 then
       frame_bg = theme.blend_rgba(host_bg, neutral_gray, 0.38)
     end
+    frame_bg = clamp_surface_luminance(frame_bg, true)
 
-    local button_bg = theme.blend_rgba(host_bg, neutral_gray, 0.52)
-    local button_hover = theme.blend_rgba(button_bg, normal_accent, 0.18)
-    local button_active = theme.blend_rgba(button_bg, normal_accent, 0.30)
-    local popup_bg = theme.with_alpha(theme.blend_rgba(host_bg, pure_white, 0.82), 252)
+    local button_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, neutral_gray, 0.52), true)
+    local button_hover = clamp_surface_luminance(theme.blend_rgba(button_bg, normal_accent, 0.18), true)
+    local button_active = clamp_surface_luminance(theme.blend_rgba(button_bg, normal_accent, 0.30), true)
+    local popup_bg = clamp_surface_luminance(theme.with_alpha(theme.blend_rgba(host_bg, pure_white, 0.82), 252), true)
 
-    -- 严格校验文字在全部关键浅色表面上的 WCAG 2.1 对比度 (>= 4.5)
-    safe_text = theme.ensure_contrast(host_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(card_base, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(row_strip_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(row_normal_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(row_open_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(frame_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(button_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(popup_bg, safe_text, theme.MIN_CONTRAST_RATIO)
+    -- 中浅灰底色 (bg_lum < 0.65) 下先将双区标题栏基底适度抬升至亮面，避免与强调色标题字糊成一团
+    local zone_base = (bg_lum < 0.65) and theme.blend_rgba(host_bg, card_base, 0.55) or host_bg
+    local strip_zone_bg = clamp_surface_luminance(theme.blend_rgba(zone_base, strip_accent, 0.11), true)
+    local normal_zone_bg = clamp_surface_luminance(theme.blend_rgba(zone_base, normal_accent, 0.10), true)
+    local header_bar_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, neutral_gray, 0.28), true)
+    local master_on_bg = strip_accent
+    local master_off_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, neutral_gray, 0.65), true)
+
+    -- 在全部浅色同侧表面上统一校验文字 WCAG 2.1 对比度 (>= 4.5)
+    safe_text = ensure_contrast_all({
+      host_bg,
+      card_base,
+      row_strip_bg,
+      row_normal_bg,
+      row_hover_bg,
+      row_open_bg,
+      frame_bg,
+      button_bg,
+      popup_bg,
+      header_bar_bg,
+      strip_zone_bg,
+      normal_zone_bg,
+    }, safe_text, theme.MIN_CONTRAST_RATIO, true)
 
     local bypassed_text = theme.ensure_contrast(
       card_base,
@@ -633,14 +708,12 @@ function theme.build_host_palette(reaper_api)
       2.8
     )
 
-    local strip_zone_bg = theme.blend_rgba(host_bg, strip_accent, 0.11)
-    local normal_zone_bg = theme.blend_rgba(host_bg, normal_accent, 0.10)
-    local header_bar_bg = theme.blend_rgba(host_bg, neutral_gray, 0.28)
-    local master_on_bg = strip_accent
-    local master_off_bg = theme.blend_rgba(host_bg, neutral_gray, 0.65)
-
     local slot_strip_col = theme.ensure_contrast(row_strip_bg, strip_accent, 4.2)
     local slot_normal_col = theme.ensure_contrast(row_normal_bg, normal_accent, 4.2)
+    local strip_zone_title = theme.ensure_contrast(strip_zone_bg, strip_accent, theme.MIN_CONTRAST_RATIO)
+    local normal_zone_title = theme.ensure_contrast(normal_zone_bg, normal_accent, theme.MIN_CONTRAST_RATIO)
+    local popup_title_strip = theme.ensure_contrast(popup_bg, strip_accent, theme.MIN_CONTRAST_RATIO)
+    local popup_title_normal = theme.ensure_contrast(popup_bg, normal_accent, theme.MIN_CONTRAST_RATIO)
     local drag_line_col = theme.ensure_contrast(host_bg, normal_accent, 3.6)
 
     result_pal = {
@@ -688,22 +761,27 @@ function theme.build_host_palette(reaper_api)
 
       header_bar_bg          = header_bar_bg,
       header_bar_border      = theme.blend_rgba(host_bg, slate_border, 0.62),
-      track_badge_bg         = theme.blend_rgba(host_bg, normal_accent, 0.14),
+      track_badge_bg         = clamp_surface_luminance(theme.blend_rgba(header_bar_bg, normal_accent, 0.14), true),
       track_badge_text       = theme.ensure_contrast(
-        theme.blend_rgba(host_bg, normal_accent, 0.14),
+        clamp_surface_luminance(theme.blend_rgba(header_bar_bg, normal_accent, 0.14), true),
         normal_accent,
         4.2
       ),
 
       strip_zone_bg          = strip_zone_bg,
       strip_zone_border      = theme.blend_rgba(host_bg, strip_accent, 0.42),
+      strip_zone_title       = strip_zone_title,
       strip_accent           = strip_accent,
       strip_accent_dim       = theme.blend_rgba(card_base, strip_accent, 0.34),
 
       normal_zone_bg         = normal_zone_bg,
       normal_zone_border     = theme.blend_rgba(host_bg, normal_accent, 0.38),
+      normal_zone_title      = normal_zone_title,
       normal_accent          = normal_accent,
       normal_accent_dim      = theme.blend_rgba(card_base, normal_accent, 0.30),
+
+      popup_title_strip      = popup_title_strip,
+      popup_title_normal     = popup_title_normal,
 
       master_on_bg           = master_on_bg,
       master_on_bg_hover     = theme.blend_rgba(master_on_bg, 0x000000FF, 0.10),
@@ -758,12 +836,13 @@ function theme.build_host_palette(reaper_api)
   else
     -- 深色宿主主题自适应派生（同时支持承接深色皮肤的彩色强调点缀）
     local base = theme.get_studio_dark_palette()
-    local card_base = theme.blend_rgba(host_bg, 0x2E3542FF, 0.34)
+    local card_base = clamp_surface_luminance(theme.blend_rgba(host_bg, 0x2E3542FF, 0.34), false)
     local frame_bg = host_edit_bg
       and theme.blend_rgba(host_bg, host_edit_bg, 0.55)
       or theme.blend_rgba(host_bg, 0x353D4CFF, 0.40)
-    local button_bg = theme.blend_rgba(host_bg, 0x3B4454FF, 0.45)
-    local popup_bg = theme.with_alpha(theme.blend_rgba(host_bg, 0x12151BFF, 0.38), 252)
+    frame_bg = clamp_surface_luminance(frame_bg, false)
+    local button_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, 0x3B4454FF, 0.45), false)
+    local popup_bg = clamp_surface_luminance(theme.with_alpha(theme.blend_rgba(host_bg, 0x12151BFF, 0.38), 252), false)
 
     local adapted_accent, accent_hue = theme.adapt_vivid_accent(card_base, host_accent_raw, 3.6, false)
     local has_vivid_accent = (adapted_accent ~= nil)
@@ -773,17 +852,27 @@ function theme.build_host_palette(reaper_api)
       strip_accent = 0xD96BB8FF
     end
 
-    local row_bg_strip = theme.blend_rgba(card_base, strip_accent, 0.06)
-    local row_bg_hover = theme.blend_rgba(card_base, normal_accent, 0.14)
-    local row_bg_open = theme.blend_rgba(card_base, normal_accent, 0.22)
+    local row_bg_strip = clamp_surface_luminance(theme.blend_rgba(card_base, strip_accent, 0.06), false)
+    local row_bg_hover = clamp_surface_luminance(theme.blend_rgba(card_base, normal_accent, 0.14), false)
+    local row_bg_open = clamp_surface_luminance(theme.blend_rgba(card_base, normal_accent, 0.22), false)
+    local header_bar_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, 0x252B36FF, 0.38), false)
+    local strip_zone_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, strip_accent, 0.12), false)
+    local normal_zone_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, normal_accent, 0.12), false)
+    local track_badge_bg = clamp_surface_luminance(theme.blend_rgba(host_bg, normal_accent, 0.22), false)
 
-    safe_text = theme.ensure_contrast(host_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(card_base, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(row_bg_strip, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(row_bg_open, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(frame_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(button_bg, safe_text, theme.MIN_CONTRAST_RATIO)
-    safe_text = theme.ensure_contrast(popup_bg, safe_text, theme.MIN_CONTRAST_RATIO)
+    safe_text = ensure_contrast_all({
+      host_bg,
+      card_base,
+      row_bg_strip,
+      row_bg_hover,
+      row_bg_open,
+      frame_bg,
+      button_bg,
+      popup_bg,
+      header_bar_bg,
+      strip_zone_bg,
+      normal_zone_bg,
+    }, safe_text, theme.MIN_CONTRAST_RATIO, false)
 
     local bypassed_text = theme.ensure_contrast(
       card_base,
@@ -832,27 +921,32 @@ function theme.build_host_palette(reaper_api)
     base.docking_preview = theme.with_alpha(normal_accent, 136)
     base.docking_empty_bg = base.child_bg
 
-    base.header_bar_bg = theme.blend_rgba(host_bg, 0x252B36FF, 0.38)
+    base.header_bar_bg = header_bar_bg
     base.header_bar_border = base.border
-    base.track_badge_bg = theme.blend_rgba(host_bg, normal_accent, 0.22)
-    base.track_badge_text = theme.ensure_contrast(base.track_badge_bg, normal_accent, 4.2)
+    base.track_badge_bg = track_badge_bg
+    base.track_badge_text = theme.ensure_contrast(track_badge_bg, normal_accent, 4.2)
 
     base.strip_accent = strip_accent
     base.strip_accent_dim = theme.blend_rgba(host_bg, strip_accent, 0.38)
-    base.strip_zone_bg = theme.blend_rgba(host_bg, strip_accent, 0.12)
+    base.strip_zone_bg = strip_zone_bg
     base.strip_zone_border = theme.blend_rgba(host_bg, strip_accent, 0.36)
+    base.strip_zone_title = theme.ensure_contrast(strip_zone_bg, strip_accent, theme.MIN_CONTRAST_RATIO)
 
     base.normal_accent = normal_accent
     base.normal_accent_dim = theme.blend_rgba(host_bg, normal_accent, 0.36)
-    base.normal_zone_bg = theme.blend_rgba(host_bg, normal_accent, 0.12)
+    base.normal_zone_bg = normal_zone_bg
     base.normal_zone_border = theme.blend_rgba(host_bg, normal_accent, 0.34)
+    base.normal_zone_title = theme.ensure_contrast(normal_zone_bg, normal_accent, theme.MIN_CONTRAST_RATIO)
+
+    base.popup_title_strip = theme.ensure_contrast(popup_bg, strip_accent, theme.MIN_CONTRAST_RATIO)
+    base.popup_title_normal = theme.ensure_contrast(popup_bg, normal_accent, theme.MIN_CONTRAST_RATIO)
 
     base.master_on_bg = strip_accent
     base.master_on_bg_hover = theme.blend_rgba(strip_accent, 0xFFFFFFFF, 0.12)
     base.master_on_text = theme.on_accent_text(strip_accent)
     base.master_off_bg = button_bg
     base.master_off_bg_hover = base.button_hovered
-    base.master_off_text = bypassed_text
+    base.master_off_text = theme.ensure_contrast(button_bg, bypassed_text, 3.6)
 
     base.row_bg_strip = row_bg_strip
     base.row_bg_normal = card_base
@@ -967,6 +1061,7 @@ function theme.push(ctx, ImGui, settings, reaper_api)
       { "Col_ResizeGripActive",      pal.resize_grip_active },
       { "Col_DockingPreview",        pal.docking_preview },
       { "Col_DockingEmptyBg",        pal.docking_empty_bg },
+      { "Col_DragDropTarget",        pal.drag_insert_line },
     }
     for _, entry in ipairs(color_entries) do
       local raw_col_enum = rawget(ImGui, entry[1])
@@ -1018,8 +1113,9 @@ function theme.push(ctx, ImGui, settings, reaper_api)
   return color_count, var_count
 end
 
---- 弹出配色与样式栈（数量为 0 时无操作）
+--- 弹出配色与样式栈（数量为 0 时无操作，并清理当前帧活跃调色板指针避免帧外读到过期主题）
 function theme.pop(ctx, ImGui, color_count, var_count)
+  theme._active_palette = nil
   if not ctx or type(ImGui) ~= "table" then
     return
   end

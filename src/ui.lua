@@ -32,6 +32,10 @@ local ui = {
   _wet_dirty = {},
   _wet_prev_mouse_y = {},
   _wet_ignore_drag = {},
+  _wet_drag_accum = {},
+  _wet_dragging = {},
+  _active_knob_row_id = nil,
+  _frame_active_knob_row_id = nil,
 
   -- 跨区/区内拖拽源缓存（用于计算高亮插入线位于目标行顶部还是底部）
   _active_dnd_zone = nil,
@@ -160,6 +164,10 @@ local function clear_wet_edit_state()
   ui._wet_dirty = {}
   ui._wet_prev_mouse_y = {}
   ui._wet_ignore_drag = {}
+  ui._wet_drag_accum = {}
+  ui._wet_dragging = {}
+  ui._active_knob_row_id = nil
+  ui._frame_active_knob_row_id = nil
 end
 
 local function show_tooltip(ctx, ImGui, primary_text, secondary_text)
@@ -384,22 +392,36 @@ local function draw_drop_target_feedback(ctx, ImGui, target_zone, target_slot, p
   end
 end
 
---- 为当前上一个 ImGui 控件挂载拖拽释放目标（含高亮插入线视觉反馈）
-local function attach_zone_drop_target(ctx, ImGui, vm, target_zone, target_slot, mark_dirty, pal, bounds, drop_style)
+--- 为当前上一个 ImGui 控件挂载拖拽释放目标（含禁用默认亮黄框与可选延迟顶层高亮绘制）
+--- @param defer_draw boolean|nil 若为 true 则仅返回是否处于有效悬停态，交由整行/标题栏在最顶层统一绘制防 Z-Order 撕裂
+--- @return boolean is_valid_drop_hover
+local function attach_zone_drop_target(ctx, ImGui, vm, target_zone, target_slot, mark_dirty, pal, bounds, drop_style, defer_draw)
+  local is_valid_hover = false
   if has_imgui(ImGui, "BeginDragDropTarget") and has_imgui(ImGui, "EndDragDropTarget") and ImGui.BeginDragDropTarget(ctx) then
     if ui._active_dnd_zone ~= nil then
-      draw_drop_target_feedback(ctx, ImGui, target_zone, target_slot, pal, bounds, drop_style)
+      is_valid_hover = true
+      if not defer_draw then
+        draw_drop_target_feedback(ctx, ImGui, target_zone, target_slot, pal, bounds, drop_style)
+      end
     end
     if has_imgui(ImGui, "AcceptDragDropPayload") then
-      local ok_dnd, payload = ImGui.AcceptDragDropPayload(ctx, DND_PAYLOAD_TYPE)
+      local no_default_rect = rawget(ImGui, "DragDropFlags_AcceptNoDrawDefaultRect")
+      local ok_dnd, payload
+      if no_default_rect ~= nil then
+        ok_dnd, payload = ImGui.AcceptDragDropPayload(ctx, DND_PAYLOAD_TYPE, enum_val(no_default_rect))
+      else
+        ok_dnd, payload = ImGui.AcceptDragDropPayload(ctx, DND_PAYLOAD_TYPE)
+      end
       if ok_dnd and payload then
         apply_fx_drop(vm, target_zone, target_slot, payload, mark_dirty)
         ui._active_dnd_zone = nil
         ui._active_dnd_slot = nil
+        is_valid_hover = false
       end
     end
     ImGui.EndDragDropTarget(ctx)
   end
+  return is_valid_hover
 end
 
 --- 绘制弹窗内单个插件条目（点击添加至目标区，右键可加入/移出自定义分组）
@@ -472,7 +494,9 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty, pal)
 
   local is_strip_target = (ui._browser_target_zone == "strip")
   local target_accent = is_strip_target and pal.strip_accent or pal.normal_accent
-  local target_title_col = is_strip_target and pal.row_slot_strip or pal.row_slot_normal
+  local target_title_col = is_strip_target
+    and (pal.popup_title_strip or pal.row_slot_strip)
+    or (pal.popup_title_normal or pal.row_slot_normal)
 
   local pushed_title = push_style_color(ctx, ImGui, "Col_Text", target_title_col)
   if is_strip_target then
@@ -577,8 +601,17 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty, pal)
     if chg_cg then
       ui._new_custom_group_name = new_cg or ""
     end
+    local enter_pressed = false
+    if has_imgui(ImGui, "IsItemFocused") and ImGui.IsItemFocused(ctx) and has_imgui(ImGui, "IsKeyPressed") then
+      local k_enter = rawget(ImGui, "Key_Enter")
+      local k_kp_enter = rawget(ImGui, "Key_KeypadEnter")
+      if (k_enter ~= nil and ImGui.IsKeyPressed(ctx, enum_val(k_enter)))
+        or (k_kp_enter ~= nil and ImGui.IsKeyPressed(ctx, enum_val(k_kp_enter))) then
+        enter_pressed = true
+      end
+    end
     ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, "新建分组##reapch_create_cgrp_btn", create_btn_w, 0) then
+    if enter_pressed or ImGui.Button(ctx, "新建分组##reapch_create_cgrp_btn", create_btn_w, 0) then
       local ok_add = core.add_custom_fx_group(ui._new_custom_group_name)
       if ok_add then
         ui._new_custom_group_name = ""
@@ -634,14 +667,18 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty, pal)
   )
 
   if ui._fx_group_mode == "flat" and total_matched > max_limit then
-    ImGui.TextDisabled(
+    render_wrapped_disabled_text(
       ctx,
-      string.format("匹配 %d 个插件 (平铺仅显示前 %d 个，请继续输入关键词)", total_matched, max_limit)
+      ImGui,
+      string.format("匹配 %d 个插件 (平铺仅显示前 %d 个，请继续输入关键词)", total_matched, max_limit),
+      popup_content_w
     )
   else
-    ImGui.TextDisabled(
+    render_wrapped_disabled_text(
       ctx,
-      string.format("匹配 %d 个插件 (%d 个分组)%s", total_matched, #groups, ui._fx_show_instruments and "" or " · 已隐藏乐器")
+      ImGui,
+      string.format("匹配 %d 个插件 (%d 个分组)%s", total_matched, #groups, ui._fx_show_instruments and "" or " · 已隐藏乐器"),
+      popup_content_w
     )
   end
 
@@ -711,7 +748,12 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty, pal)
 
         if node_open then
           if #grp.items == 0 then
-            ImGui.TextDisabled(ctx, "  (分组为空，可在其他分类中右键插件加入此分组)")
+            render_wrapped_disabled_text(
+              ctx,
+              ImGui,
+              "  (分组为空，可在其他分类中右键插件加入此分组)",
+              popup_content_w - 42
+            )
           else
             for idx, item in ipairs(grp.items) do
               ImGui.PushID(ctx, tostring(item.index or idx))
@@ -721,9 +763,11 @@ local function render_fx_browser_popup(ctx, ImGui, vm, mark_dirty, pal)
               ImGui.PopID(ctx)
             end
             if grp_total > #grp.items then
-              ImGui.TextDisabled(
+              render_wrapped_disabled_text(
                 ctx,
-                string.format("  ... 仅显示本组前 %d 项 (共 %d 项)，请输入搜索词继续筛选", #grp.items, grp_total)
+                ImGui,
+                string.format("  ... 仅显示本组前 %d 项 (共 %d 项)，请输入搜索词继续筛选", #grp.items, grp_total),
+                popup_content_w - 42
               )
             end
           end
@@ -857,6 +901,8 @@ local function render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, 
     ui._wet_last_val[row_id] = nil
     ui._wet_dirty[row_id] = nil
     ui._wet_prev_mouse_y[row_id] = nil
+    ui._wet_drag_accum[row_id] = nil
+    ui._wet_dragging[row_id] = nil
     if math.abs(1.0 - pre_wet) > 1e-4 or cur_wet_pct ~= 100 then
       core.set_fx_wet(vm.track, item.fx_id, 1.0, true, pre_wet)
       mark_dirty()
@@ -865,15 +911,21 @@ local function render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, 
     cur_wet_pct = 100
   end
 
-  -- 2. 按住鼠标上下拖拽实时调参（record_undo = false，Shift 开启 4 倍精细微调）
+  -- 2. 按住鼠标上下拖拽实时调参（record_undo = false，1.5px 防双击微抖启动阈值且不吞像素，Shift 开启 4 倍精细微调）
   if not is_active then
     ui._wet_ignore_drag[row_id] = nil
     ui._wet_prev_mouse_y[row_id] = nil
+    ui._wet_drag_accum[row_id] = nil
+    ui._wet_dragging[row_id] = nil
   elseif not ui._wet_ignore_drag[row_id] then
+    ui._frame_active_knob_row_id = row_id
+    ui._active_knob_row_id = row_id
     if ui._wet_edit_start[row_id] == nil then
       ui._wet_edit_start[row_id] = cur_wet
       ui._wet_last_val[row_id] = cur_wet
       ui._wet_dirty[row_id] = false
+      ui._wet_drag_accum[row_id] = 0.0
+      ui._wet_dragging[row_id] = false
     end
 
     local dy = 0.0
@@ -891,14 +943,28 @@ local function render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, 
     end
 
     if math.abs(dy) > 0.0 then
-      local sensitivity = is_shift_held(ctx, ImGui) and 460.0 or 115.0
-      local prev_val = ui._wet_last_val[row_id] or cur_wet
-      local next_val = math.max(0.0, math.min(1.0, prev_val - (dy / sensitivity)))
-      if math.abs(next_val - prev_val) > 1e-4 then
-        ui._wet_last_val[row_id] = next_val
-        ui._wet_dirty[row_id] = true
-        core.set_fx_wet(vm.track, item.fx_id, next_val, false)
-        mark_dirty()
+      local eff_dy = dy
+      if not ui._wet_dragging[row_id] then
+        local accum = (ui._wet_drag_accum[row_id] or 0.0) + dy
+        ui._wet_drag_accum[row_id] = accum
+        if math.abs(accum) >= 1.5 then
+          ui._wet_dragging[row_id] = true
+          eff_dy = accum
+        else
+          eff_dy = 0.0
+        end
+      end
+
+      if math.abs(eff_dy) > 0.0 then
+        local sensitivity = is_shift_held(ctx, ImGui) and 460.0 or 115.0
+        local prev_val = ui._wet_last_val[row_id] or cur_wet
+        local next_val = math.max(0.0, math.min(1.0, prev_val - (eff_dy / sensitivity)))
+        if math.abs(next_val - prev_val) > 1e-4 then
+          ui._wet_last_val[row_id] = next_val
+          ui._wet_dirty[row_id] = true
+          core.set_fx_wet(vm.track, item.fx_id, next_val, false)
+          mark_dirty()
+        end
       end
     end
 
@@ -915,6 +981,8 @@ local function render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, 
     ui._wet_last_val[row_id] = nil
     ui._wet_dirty[row_id] = nil
     ui._wet_prev_mouse_y[row_id] = nil
+    ui._wet_drag_accum[row_id] = nil
+    ui._wet_dragging[row_id] = nil
 
     if was_dirty and type(start_wet) == "number" and math.abs(final_wet - start_wet) > 1e-4 then
       core.set_fx_wet(vm.track, item.fx_id, final_wet, true, start_wet)
@@ -977,7 +1045,7 @@ local function render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, 
       local pct_str = string.format("%d%%", cur_wet_pct)
       local pct_w = calc_text_width(ctx, ImGui, pct_str)
       local line_h = has_imgui(ImGui, "GetTextLineHeight") and ImGui.GetTextLineHeight(ctx) or 13
-      local text_x = math.max(x1 + 22.0, x2 - pct_w - 3.0)
+      local text_x = math.max(x1 + 22.5, x2 - pct_w - 3.0)
       local text_y = cy - line_h * 0.5
       local text_col = pal.knob_text
       if not effectively_enabled then
@@ -1070,24 +1138,28 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     y2 = row_y + row_h,
   }
 
-  -- 精确分配行内 4 段控件宽度（严格锁定在卡片内部，超窄 Split Dock <170px 自动切换纯旋钮防横滚与溢出）
+  -- 精确分配行内 4 段控件宽度（严格锁定在卡片内部，超窄 Split Dock <196px 自动切换纯旋钮优先保证插件名可读）
   local left_pad = 5
   local led_w = 18
   local del_w = 20
   local right_pad = 2
-  local show_knob_pct = (row_w >= 170)
+  local show_knob_pct = (row_w >= 196)
   local pct_max_w = calc_text_width(ctx, ImGui, "100%")
   local knob_w = show_knob_pct and math.max(58, math.ceil(24 + pct_max_w + 4)) or 24
   local name_w = math.max(24, row_w - left_pad - led_w - knob_w - del_w - right_pad)
 
-  -- 0. 单行卡片容器底色、1px 柔和描边与左侧微细强调色条（叠加 IsWindowHovered 防止弹窗遮挡时背后行误亮）
+  -- 0. 单行卡片容器底色、1px 柔和描边与左侧微细强调色条（叠加 IsWindowHovered 阻断弹窗遮挡穿透，并在拖拽其他行 MIX 旋钮时抑制经过行乱亮）
   if dl and has_imgui(ImGui, "DrawList_AddRectFilled") then
     local win_hovered = (not has_imgui(ImGui, "IsWindowHovered")) or ImGui.IsWindowHovered(ctx)
-    local row_hovered = win_hovered
-      and (not ui._active_dnd_zone)
-      and has_imgui(ImGui, "IsMouseHoveringRect")
-      and ImGui.IsMouseHoveringRect(ctx, row_bounds.x1, row_bounds.y1, row_bounds.x2, row_bounds.y2)
-      or false
+    local other_knob_dragging = (ui._active_knob_row_id ~= nil and ui._active_knob_row_id ~= row_id)
+    local this_knob_dragging = (ui._active_knob_row_id == row_id)
+    local row_hovered = this_knob_dragging
+      or (win_hovered
+        and (not other_knob_dragging)
+        and (not ui._active_dnd_zone)
+        and has_imgui(ImGui, "IsMouseHoveringRect")
+        and ImGui.IsMouseHoveringRect(ctx, row_bounds.x1, row_bounds.y1, row_bounds.x2, row_bounds.y2)
+        or false)
 
     local bg_col = is_strip and pal.row_bg_strip or pal.row_bg_normal
     if item.is_open then
@@ -1115,6 +1187,8 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     ImGui.DrawList_AddRectFilled(dl, row_bounds.x1 + 0.5, row_bounds.y1 + 2.5, row_bounds.x1 + 3.5, row_bounds.y2 - 2.5, bar_col, 1.5)
   end
 
+  local row_drop_hovered = false
+
   -- 1. 单行独立 Bypass 指示灯（避开左侧色条）
   if has_imgui(ImGui, "SetCursorPosX") then
     ImGui.SetCursorPosX(ctx, start_cursor_x + left_pad)
@@ -1123,7 +1197,9 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     core.set_fx_enabled(vm.track, item.fx_id, new_en)
     mark_dirty()
   end)
-  attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds)
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds, "row", true) then
+    row_drop_hovered = true
+  end
 
   -- 2. 插件名称热区（零 Selectable 脏矩形、UTF-8 安全截断 + ClipRect 防溢出、点击切换悬浮窗、双向拖拽与右键菜单）
   ImGui.SameLine(ctx, 0, 0)
@@ -1188,7 +1264,7 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     name_hovered = has_imgui(ImGui, "IsItemHovered") and ImGui.IsItemHovered(ctx) or false
   end
 
-  if clicked_name then
+  if clicked_name and ui._active_dnd_zone == nil then
     core.toggle_fx_floating_window(vm.track, item.fx_id)
     mark_dirty()
   end
@@ -1210,7 +1286,9 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     ImGui.EndDragDropSource(ctx)
   end
 
-  attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds)
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds, "row", true) then
+    row_drop_hovered = true
+  end
 
   -- 2b. 右键快捷菜单（紧跟名称热区绑定，打开期间抑制悬停 Tooltip 防遮挡）
   local row_ctx_open = false
@@ -1297,7 +1375,9 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
   -- 3. 单行紧凑圆弧 MIX (Wet/Dry 干湿比) 旋钮
   ImGui.SameLine(ctx, 0, 0)
   render_mix_knob(ctx, ImGui, dl, pal, vm, item, row_id, is_strip, effectively_enabled, knob_w, row_h, mark_dirty, show_knob_pct)
-  attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds)
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds, "row", true) then
+    row_drop_hovered = true
+  end
 
   -- 4. 快捷移除按钮
   ImGui.SameLine(ctx, 0, 0)
@@ -1309,7 +1389,14 @@ local function render_fx_row(ctx, ImGui, vm, item, zone, total_count, mark_dirty
     end
     mark_dirty()
   end)
-  attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds)
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, slot_num, mark_dirty, pal, row_bounds, "row", true) then
+    row_drop_hovered = true
+  end
+
+  -- 在整行 4 段全部绘制完毕后统一于最顶层叠加拖拽高亮底色与插入线，彻底消除 Z-Order 遮挡撕裂
+  if row_drop_hovered and ui._active_dnd_zone ~= nil then
+    draw_drop_target_feedback(ctx, ImGui, zone, slot_num, pal, row_bounds, "row")
+  end
 
   ImGui.PopID(ctx)
 end
@@ -1387,7 +1474,9 @@ local function render_zone_header(ctx, ImGui, vm, zone, title_text, count_num, p
   local bg_col = is_strip and pal.strip_zone_bg or pal.normal_zone_bg
   local border_col = is_strip and pal.strip_zone_border or pal.normal_zone_border
   local accent_col = is_strip and pal.strip_accent or pal.normal_accent
-  local title_col = is_strip and pal.row_slot_strip or pal.row_slot_normal
+  local title_col = is_strip
+    and (pal.strip_zone_title or pal.row_slot_strip)
+    or (pal.normal_zone_title or pal.row_slot_normal)
 
   if dl and has_imgui(ImGui, "DrawList_AddRectFilled") then
     ImGui.DrawList_AddRectFilled(dl, bounds.x1, bounds.y1, bounds.x2, bounds.y2, bg_col, 4.0)
@@ -1398,15 +1487,17 @@ local function render_zone_header(ctx, ImGui, vm, zone, title_text, count_num, p
   end
 
   local left_pad = 8
-  local add_label = "+ 添加"
-  local add_w = math.max(48, math.ceil(calc_text_width(ctx, ImGui, add_label) + 12))
+  local compact_add = (hdr_w < 170)
+  local add_label = compact_add and "+" or "+ 添加"
+  local add_w = compact_add and 24 or math.max(48, math.ceil(calc_text_width(ctx, ImGui, add_label) + 12))
   local show_master = is_strip and vm.strip.initialized
   local pill_w = show_master and 34 or 0
   local gap_before_mid = 2
   local gap_before_add = show_master and 4 or 2
   local right_pad = 4
   local used_right = (show_master and (gap_before_mid + pill_w) or 0) + gap_before_add + add_w + right_pad
-  local title_w = math.max(28, hdr_w - left_pad - used_right)
+  local title_w = math.max(16, hdr_w - left_pad - used_right)
+  local hdr_drop_hovered = false
 
   -- 左侧标题热区（承接拖放至本区末尾）
   if has_imgui(ImGui, "SetCursorPosX") then
@@ -1443,7 +1534,9 @@ local function render_zone_header(ctx, ImGui, vm, zone, title_text, count_num, p
     ImGui.Selectable(ctx, title_display .. "##" .. zone .. "_zone_hdr", false, 0, title_w, 0)
     pop_style_color(ctx, ImGui, pushed_hdr)
   end
-  attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header")
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header", true) then
+    hdr_drop_hovered = true
+  end
 
   -- 上半区总 Bypass 硬件胶囊开关
   if show_master then
@@ -1452,16 +1545,33 @@ local function render_zone_header(ctx, ImGui, vm, zone, title_text, count_num, p
       core.set_strip_enabled(vm.track, new_en)
       mark_dirty()
     end)
-    attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header")
+    if attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header", true) then
+      hdr_drop_hovered = true
+    end
   end
 
-  -- 右侧 "+ 添加" 按钮（BeginGroup 垂直居中，零 +2px 幽灵行距漂移）
+  -- 右侧 "+ 添加" 按钮（超窄 Split Dock <170px 自动切紧凑 "+" 防破框；BeginGroup 垂直居中零行距漂移）
   ImGui.SameLine(ctx, 0, gap_before_add)
-  local clicked_add = render_centered_button(ctx, ImGui, add_label .. "##" .. zone .. "_add_fx_btn", add_w, hdr_h, dl and 2 or 0)
+  local clicked_add, add_hovered = render_centered_button(ctx, ImGui, add_label .. "##" .. zone .. "_add_fx_btn", add_w, hdr_h, dl and 2 or 0)
   if clicked_add then
     open_fx_browser_popup(ctx, ImGui, zone)
   end
-  attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header")
+  if compact_add and add_hovered and not ui._active_dnd_zone then
+    show_tooltip(
+      ctx,
+      ImGui,
+      is_strip and "添加插件至 0 号位 Channel Strip" or "添加插件至常规 FX 槽",
+      "点击打开插件分组搜索浏览器"
+    )
+  end
+  if attach_zone_drop_target(ctx, ImGui, vm, zone, nil, mark_dirty, pal, bounds, "header", true) then
+    hdr_drop_hovered = true
+  end
+
+  -- 标题栏全部子控件绘制完成后统一在最顶层绘制拖拽高亮框，避免被右侧按钮遮挡
+  if hdr_drop_hovered and ui._active_dnd_zone ~= nil then
+    draw_drop_target_feedback(ctx, ImGui, zone, nil, pal, bounds, "header")
+  end
 end
 
 --- 绘制顶部固定轨道信息栏与右上角 ⚙ 设置按钮（轨道名超长自动截断，绝不挤出 ⚙ 按钮）
@@ -1682,11 +1792,12 @@ local function render_displaced_warning_card(ctx, ImGui, vm, mark_dirty, pal)
     end
   end
 
-  local snap_label = "一键归位"
-  local snap_w = math.max(58, math.ceil(calc_text_width(ctx, ImGui, snap_label) + 12))
+  local compact_snap = (card_w < 160)
+  local snap_label = compact_snap and "归位" or "一键归位"
+  local snap_w = math.max(compact_snap and 38 or 58, math.ceil(calc_text_width(ctx, ImGui, snap_label) + 12))
   local left_pad = 8
   local right_pad = 4
-  local msg_w = math.max(28, card_w - left_pad - snap_w - right_pad - 4)
+  local msg_w = math.max(20, card_w - left_pad - snap_w - right_pad - 4)
   local warn_msg = string.format("⚠ Strip 偏离至 #%d", tonumber(vm.strip.displaced_pos) or 0)
 
   if has_imgui(ImGui, "SetCursorPosX") then
@@ -1801,7 +1912,13 @@ local function render_upper_strip_zone(ctx, ImGui, vm, mark_dirty, pal)
   if not vm.strip.initialized then
     local avail_w = has_imgui(ImGui, "GetContentRegionAvail") and ImGui.GetContentRegionAvail(ctx) or 260
     local init_w = math.max(120, math.floor(avail_w))
-    if ImGui.Button(ctx, "+ 初始化 0 号位 Channel Strip##init_strip_btn", init_w, 26) then
+    local init_label = "+ 初始化 0 号位 Channel Strip"
+    if init_w < 150 then
+      init_label = "+ 初始化 Strip"
+    elseif init_w < 205 then
+      init_label = "+ 初始化 0 号位 Strip"
+    end
+    if ImGui.Button(ctx, init_label .. "##init_strip_btn", init_w, 26) then
       core.init_strip_container(vm.track)
       mark_dirty()
     end
@@ -1879,6 +1996,7 @@ function ui.draw(ctx, ImGui, vm, settings, on_dirty)
   local col_cnt, var_cnt = theme.push(ctx, ImGui, settings)
   local pal = theme.get_palette(settings)
   ui._frame_has_dnd_source = false
+  ui._frame_active_knob_row_id = nil
   local window_flags = enum_val(rawget(ImGui, "WindowFlags_None"))
   local visible, open = ImGui.Begin(ctx, "Reaper ProChannel", true, window_flags)
 
@@ -1907,7 +2025,8 @@ function ui.draw(ctx, ImGui, vm, settings, on_dirty)
       if body_visible then
         if not vm.has_track then
           ImGui.Spacing(ctx)
-          ImGui.TextDisabled(ctx, "请在 REAPER 中选中一条轨道以查看双区插件。")
+          local empty_w = has_imgui(ImGui, "GetContentRegionAvail") and ImGui.GetContentRegionAvail(ctx) or 220
+          render_wrapped_disabled_text(ctx, ImGui, "请在 REAPER 中选中一条轨道以查看双区插件。", math.max(100, math.floor(empty_w)))
         else
           render_upper_strip_zone(ctx, ImGui, vm, mark_dirty, pal)
           render_lower_normal_zone(ctx, ImGui, vm, mark_dirty, pal)
@@ -1919,7 +2038,8 @@ function ui.draw(ctx, ImGui, vm, settings, on_dirty)
       -- 极端无 BeginChild 环境回退直接渲染
       if not vm.has_track then
         ImGui.Spacing(ctx)
-        ImGui.TextDisabled(ctx, "请在 REAPER 中选中一条轨道以查看双区插件。")
+        local empty_w = has_imgui(ImGui, "GetContentRegionAvail") and ImGui.GetContentRegionAvail(ctx) or 220
+        render_wrapped_disabled_text(ctx, ImGui, "请在 REAPER 中选中一条轨道以查看双区插件。", math.max(100, math.floor(empty_w)))
       else
         render_upper_strip_zone(ctx, ImGui, vm, mark_dirty, pal)
         render_lower_normal_zone(ctx, ImGui, vm, mark_dirty, pal)
@@ -1941,6 +2061,7 @@ function ui.draw(ctx, ImGui, vm, settings, on_dirty)
     ui._active_dnd_zone = nil
     ui._active_dnd_slot = nil
   end
+  ui._active_knob_row_id = ui._frame_active_knob_row_id
 
   theme.pop(ctx, ImGui, col_cnt, var_cnt)
   return open

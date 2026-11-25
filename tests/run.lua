@@ -1767,6 +1767,325 @@ run_test("v0.2.1 中灰 WCAG 兜底、极淡粉红/深色对比度、MIX 旋钮�
 end)
 
 --------------------------------------------------------------------------------
+-- 用例 17 (v0.2.1 深度复核回归)：中灰/中浅灰完整调色板对比度、顶层 DnD Z-Order 与交互防误触
+--------------------------------------------------------------------------------
+run_test("v0.2.1 中灰/中浅灰全表面对比度、去黄框与顶层 DnD Z-Order、旋钮防手抖/跨行隔离与超窄 120px", function(r)
+  -- 17.1 中灰 (122,122,122, L≈0.194)、中浅灰 (145,145,148, L≈0.284) 与暗灰+亮强调色全表面 WCAG 对比度校验
+  local test_themes = {
+    {
+      name = "mid-gray 122",
+      colors = {
+        col_main_bg2 = r.ColorToNative(122, 122, 122),
+        col_main_text2 = r.ColorToNative(125, 125, 125),
+        col_tcp_bgsel = r.ColorToNative(244, 143, 177),
+      },
+      expect_mode = "host_light",
+    },
+    {
+      name = "mid-light-gray 145",
+      colors = {
+        col_main_bg2 = r.ColorToNative(145, 145, 148),
+        col_main_text2 = r.ColorToNative(140, 140, 140),
+        col_tcp_bgsel = r.ColorToNative(244, 143, 177),
+      },
+      expect_mode = "host_light",
+    },
+    {
+      name = "dark-mid-gray 110 + bright accent",
+      colors = {
+        col_main_bg2 = r.ColorToNative(110, 112, 116),
+        col_main_editbk = r.ColorToNative(240, 240, 240), -- 模拟暗主题配亮输入框极端混合皮肤
+        col_main_text2 = r.ColorToNative(90, 90, 90),
+        col_tcp_bgsel = r.ColorToNative(255, 220, 80),
+      },
+      expect_mode = "host_dark",
+    },
+  }
+
+  for _, tc in ipairs(test_themes) do
+    r.mock_set_theme_colors(tc.colors)
+    local pal = theme.resolve_palette({ follow_host_theme = true }, r)
+    assert_eq(pal.mode, tc.expect_mode, tc.name .. ": expected mode")
+    local surfaces = {
+      { "window_bg", pal.window_bg },
+      { "row_bg_strip", pal.row_bg_strip },
+      { "row_bg_normal", pal.row_bg_normal },
+      { "row_bg_hover", pal.row_bg_hover },
+      { "row_bg_open", pal.row_bg_open },
+      { "frame_bg", pal.frame_bg },
+      { "button", pal.button },
+      { "popup_bg", pal.popup_bg },
+      { "header_bar_bg", pal.header_bar_bg },
+    }
+    for _, sf in ipairs(surfaces) do
+      assert_true(
+        theme.contrast_ratio(sf[2], pal.text) >= 4.5,
+        tc.name .. ": text contrast >= 4.5 on " .. sf[1]
+      )
+    end
+    assert_true(
+      theme.contrast_ratio(pal.strip_zone_bg, pal.strip_zone_title) >= 4.5,
+      tc.name .. ": strip_zone_title contrast >= 4.5 on strip_zone_bg"
+    )
+    assert_true(
+      theme.contrast_ratio(pal.normal_zone_bg, pal.normal_zone_title) >= 4.5,
+      tc.name .. ": normal_zone_title contrast >= 4.5 on normal_zone_bg"
+    )
+    assert_true(
+      theme.contrast_ratio(pal.popup_bg, pal.popup_title_strip) >= 4.5,
+      tc.name .. ": popup_title_strip contrast >= 4.5 on popup_bg"
+    )
+    assert_true(
+      theme.contrast_ratio(pal.popup_bg, pal.popup_title_normal) >= 4.5,
+      tc.name .. ": popup_title_normal contrast >= 4.5 on popup_bg"
+    )
+    assert_true(
+      theme.contrast_ratio(pal.master_off_bg, pal.master_off_text) >= 3.6,
+      tc.name .. ": master_off_text contrast >= 3.6 on master_off_bg"
+    )
+  end
+
+  -- 17.2 theme.push 压入 Col_DragDropTarget 且 theme.pop 清空 _active_palette 防帧外过期
+  local pushed_dnd_col = false
+  local dnd_col_imgui = setmetatable({
+    Col_DragDropTarget = 77,
+    PushStyleColor = function(_c, idx)
+      if idx == 77 then
+        pushed_dnd_col = true
+      end
+    end,
+    PopStyleColor = function() end,
+  }, {
+    __index = function(_, key)
+      error("strict Col_DragDropTarget metatable violation: " .. tostring(key))
+    end,
+  })
+  local c_dnd, v_dnd = theme.push("ctx", dnd_col_imgui, { follow_host_theme = true }, r)
+  assert_true(pushed_dnd_col, "theme.push pushes Col_DragDropTarget")
+  theme.pop("ctx", dnd_col_imgui, c_dnd, v_dnd)
+  assert_eq(theme._active_palette, nil, "theme.pop clears _active_palette")
+  local fresh_studio = theme.get_palette({ follow_host_theme = false }, r)
+  assert_eq(fresh_studio.mode, "studio_dark", "get_palette after theme.pop resolves fresh studio_dark without stale cache")
+
+  -- 17.3 拖拽去默认黄框 (AcceptNoDrawDefaultRect) + Z-Order 顶层绘制顺序 + 拖拽取消防误弹窗口 + 旋钮微抖动防垃圾 Undo & 跨行隔离
+  local tr = r.mock_add_track("ZOrder & Ergonomics Track")
+  core.add_fx_to_strip(tr, "VST3: Row1EQ")
+  core.add_fx_to_strip(tr, "VST3: Row2Comp")
+  local vm = core.build_view_model(tr)
+
+  local function make_zorder_imgui(cfg)
+    cfg = cfg or {}
+    local st = {
+      id_stack = {},
+      current_row_id = "",
+      last_item = "",
+      draw_seq = {},
+      accept_flags = {},
+      row_hover_fills = {},
+      button_labels = {},
+      color_depth = 0,
+      var_depth = 0,
+      wrap_depth = 0,
+      group_depth = 0,
+    }
+    local dl = { _mock_dl = true }
+    local studio_p = theme.get_studio_dark_palette()
+    local api = {
+      _st = st,
+      Cond_FirstUseEver = 4,
+      WindowFlags_None = 0,
+      MouseButton_Left = 0,
+      MouseCursor_Hand = 7,
+      MouseCursor_ResizeNS = 3,
+      Mod_Shift = 1,
+      DragDropFlags_AcceptNoDrawDefaultRect = 2048,
+      Col_Text = 1,
+      Col_WindowBg = 2,
+      Col_ChildBg = 3,
+      Col_DragDropTarget = 77,
+      StyleVar_WindowRounding = 1,
+      StyleVar_WindowPadding = 2,
+      SetNextWindowSize = function() end,
+      SetMouseCursor = function() end,
+      PushStyleColor = function() st.color_depth = st.color_depth + 1 end,
+      PopStyleColor = function(_c, n) st.color_depth = st.color_depth - (tonumber(n) or 1) end,
+      PushStyleVar = function() st.var_depth = st.var_depth + 1 end,
+      PopStyleVar = function(_c, n) st.var_depth = st.var_depth - (tonumber(n) or 1) end,
+      PushID = function(_c, id)
+        st.id_stack[#st.id_stack + 1] = tostring(id or "")
+        st.current_row_id = st.id_stack[#st.id_stack]
+      end,
+      PopID = function()
+        st.id_stack[#st.id_stack] = nil
+        st.current_row_id = st.id_stack[#st.id_stack] or ""
+      end,
+      BeginGroup = function() st.group_depth = st.group_depth + 1 end,
+      EndGroup = function() st.group_depth = st.group_depth - 1 end,
+      PushTextWrapPos = function() st.wrap_depth = st.wrap_depth + 1 end,
+      PopTextWrapPos = function() st.wrap_depth = st.wrap_depth - 1 end,
+      Begin = function() return true, true end,
+      End = function() end,
+      BeginChild = function() return true end,
+      EndChild = function() end,
+      IsWindowDocked = function() return false end,
+      IsWindowHovered = function() return true end,
+      GetWindowDrawList = function() return dl end,
+      GetCursorScreenPos = function() return 10, 20 end,
+      GetCursorPosX = function() return 8 end,
+      GetCursorPosY = function() return 12 end,
+      SetCursorPosX = function() end,
+      SetCursorPosY = function() end,
+      GetContentRegionAvail = function() return cfg.avail_w or 240, 500 end,
+      GetFrameHeight = function() return 20 end,
+      GetTextLineHeight = function() return 14 end,
+      CalcTextSize = function(_c, txt) return #tostring(txt or "") * 5, 14 end,
+      SameLine = function() end,
+      Spacing = function() end,
+      Separator = function() end,
+      Text = function() end,
+      TextDisabled = function() end,
+      Button = function(_c, label)
+        st.button_labels[#st.button_labels + 1] = tostring(label or "")
+        st.last_item = "button"
+        return false
+      end,
+      InvisibleButton = function(_c, id)
+        st.last_item = tostring(id or "")
+        if cfg.click_name_on_row == st.current_row_id and st.last_item == "##row_name" then
+          return true
+        end
+        return false
+      end,
+      IsItemHovered = function()
+        return cfg.knob_row == st.current_row_id and st.last_item == "##row_wet_knob"
+      end,
+      IsItemActive = function()
+        return cfg.knob_active and cfg.knob_row == st.current_row_id and st.last_item == "##row_wet_knob"
+      end,
+      IsItemDeactivated = function()
+        return cfg.knob_deactivated and cfg.knob_row == st.current_row_id and st.last_item == "##row_wet_knob"
+      end,
+      IsMouseHoveringRect = function() return cfg.mouse_in_rect and true or false end,
+      IsMouseDoubleClicked = function() return false end,
+      GetItemRectMin = function() return 10, 20 end,
+      GetItemRectMax = function() return 130, 44 end,
+      GetMouseDelta = function() return 0, cfg.mouse_dy or 0 end,
+      GetKeyMods = function() return 0 end,
+      BeginDragDropSource = function()
+        return cfg.drag_source_row == st.current_row_id and st.last_item == "##row_name"
+      end,
+      SetDragDropPayload = function() end,
+      EndDragDropSource = function() end,
+      BeginDragDropTarget = function()
+        -- 模拟拖拽悬停在 Row2 的第 1 段控件 (##row_bypass LED) 上
+        return cfg.drop_hover_led_row == st.current_row_id and st.last_item == "##row_bypass"
+      end,
+      AcceptDragDropPayload = function(_c, _t, flags)
+        st.accept_flags[#st.accept_flags + 1] = flags
+        return false, nil
+      end,
+      EndDragDropTarget = function() end,
+      BeginPopupContextItem = function() return false end,
+      OpenPopup = function() end,
+      BeginPopup = function() return false end,
+      EndPopup = function() end,
+      CloseCurrentPopup = function() end,
+      BeginTooltip = function() return false end,
+      EndTooltip = function() end,
+      DrawList_AddRectFilled = function(_dl, _x1, _y1, _x2, _y2, col)
+        if col == studio_p.row_bg_hover and st.current_row_id ~= "" then
+          st.row_hover_fills[st.current_row_id] = true
+        end
+        if col == studio_p.drag_target_fill then
+          st.draw_seq[#st.draw_seq + 1] = "drop_fill:" .. st.current_row_id
+        end
+      end,
+      DrawList_AddRect = function() end,
+      DrawList_AddLine = function(_dl, _x1, _y1, _x2, _y2, col)
+        if col == studio_p.drag_insert_line then
+          st.draw_seq[#st.draw_seq + 1] = "drop_line:" .. st.current_row_id
+        end
+      end,
+      DrawList_AddCircle = function() end,
+      DrawList_AddCircleFilled = function() end,
+      DrawList_AddText = function(_dl, _x, _y, _col, txt)
+        if st.current_row_id == cfg.drop_hover_led_row then
+          st.draw_seq[#st.draw_seq + 1] = "text:" .. tostring(txt or "")
+        end
+      end,
+      DrawList_PathClear = function() end,
+      DrawList_PathArcTo = function() end,
+      DrawList_PathStroke = function()
+        if st.current_row_id == cfg.drop_hover_led_row then
+          st.draw_seq[#st.draw_seq + 1] = "knob_arc:" .. st.current_row_id
+        end
+      end,
+      DrawList_PushClipRect = function() end,
+      DrawList_PopClipRect = function() end,
+    }
+    return setmetatable(api, {
+      __index = function(_, key)
+        error("strict v0.2.1 ZOrder metatable violation: " .. tostring(key))
+      end,
+    })
+  end
+
+  local row1_id = vm.strip.children[1].guid
+  local row2_id = vm.strip.children[2].guid
+
+  -- 17.3a 拖拽 Row1 悬停在 Row2 的 LED 上：AcceptDragDropPayload 必须传 AcceptNoDrawDefaultRect，且插入线必须在名称与旋钮弧线之后绘制
+  ui._active_dnd_zone = "strip"
+  ui._active_dnd_slot = 1
+  local ig_z = make_zorder_imgui({ drag_source_row = row1_id, drop_hover_led_row = row2_id })
+  ui.draw("ctx", ig_z, vm, { follow_host_theme = false }, function() end)
+  assert_true(#ig_z._st.accept_flags >= 1, "AcceptDragDropPayload invoked on LED drop target")
+  assert_eq(ig_z._st.accept_flags[1], 2048, "AcceptDragDropPayload passes DragDropFlags_AcceptNoDrawDefaultRect")
+  local last_knob_pos, drop_line_pos = 0, 0
+  for idx, tag in ipairs(ig_z._st.draw_seq) do
+    if tag == ("knob_arc:" .. row2_id) then
+      last_knob_pos = idx
+    elseif tag == ("drop_line:" .. row2_id) then
+      drop_line_pos = idx
+    end
+  end
+  assert_true(last_knob_pos > 0 and drop_line_pos > last_knob_pos, "drop_insert_line drawn on top AFTER row name and MIX knob (no Z-order tearing)")
+
+  -- 17.3b 拖拽取消回到自身松手时（上一帧 _active_dnd_zone 非空，InvisibleButton 返回 true）绝不误弹插件悬浮窗
+  local ig_cancel = make_zorder_imgui({ click_name_on_row = row1_id })
+  ui.draw("ctx", ig_cancel, vm, { follow_host_theme = false }, function() end)
+  assert_false(r.TrackFX_GetOpen(tr, vm.strip.children[1].fx_id), "canceling DnD over self does not toggle floating window")
+  assert_eq(ui._active_dnd_zone, nil, "_active_dnd_zone cleared after drag ends")
+
+  -- 17.3c 按住 Row1 MIX 旋钮发生 1px 轻微手抖并松手：不改参数、不写垃圾 Undo，且拖拽期间不点亮 Row2 的 row_bg_hover
+  local undo_cnt = #r._state.undo_history
+  local ig_jitter = make_zorder_imgui({ knob_row = row1_id, knob_active = true, mouse_dy = 1.0, mouse_in_rect = true })
+  ui.draw("ctx", ig_jitter, vm, { follow_host_theme = false }, function() end)
+  assert_eq(core.build_view_model(tr).strip.children[1].wet_percent, 100, "1px jitter below 1.5px deadzone does not alter wet")
+  assert_false(ig_jitter._st.row_hover_fills[row2_id], "dragging Row1 knob suppresses row_bg_hover on Row2")
+
+  local ig_jitter_rel = make_zorder_imgui({ knob_row = row1_id, knob_active = false, knob_deactivated = true })
+  ui.draw("ctx", ig_jitter_rel, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_cnt, "releasing after 1px micro-jitter writes zero garbage Undo")
+
+  -- 17.3d 120px 极窄 Split Dock 下标题栏自动切换紧凑 "+" 按钮防破框，且无轨道帧自动换行栈平衡
+  local ig_120 = make_zorder_imgui({ avail_w = 120 })
+  ui.draw("ctx", ig_120, vm, { follow_host_theme = false }, function() end)
+  local saw_compact_add = false
+  for _, lbl in ipairs(ig_120._st.button_labels) do
+    if lbl == "+##strip_add_fx_btn" then
+      saw_compact_add = true
+    end
+  end
+  assert_true(saw_compact_add, "120px ultra-narrow Split Dock switches zone add button to compact '+'")
+  assert_eq(ig_120._st.color_depth, 0, "120px color stack balanced")
+  assert_eq(ig_120._st.group_depth, 0, "120px group stack balanced")
+
+  local ig_empty_120 = make_zorder_imgui({ avail_w = 120 })
+  ui.draw("ctx", ig_empty_120, core.build_view_model(nil), { follow_host_theme = false }, function() end)
+  assert_eq(ig_empty_120._st.wrap_depth, 0, "no-track wrapped text stack balanced at 120px")
+end)
+
+--------------------------------------------------------------------------------
 -- 汇总结果与退出码
 --------------------------------------------------------------------------------
 _G.reaper = host_reaper
