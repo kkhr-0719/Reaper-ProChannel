@@ -15,6 +15,7 @@ theme.MIN_CONTRAST_RATIO = 4.5
 theme.LIGHT_LUMINANCE_THRESHOLD = 0.22
 
 theme._active_palette = nil
+theme._studio_dark_cache = nil
 theme._host_cache_sig = nil
 theme._host_cache_palette = nil
 
@@ -233,9 +234,18 @@ function theme.ensure_contrast(bg_rgba, fg_rgba, min_ratio)
 
   local dark_anchor = 0x14181FFF
   local light_anchor = 0xF4F7FBFF
-  local anchor = (theme.contrast_ratio(bg, dark_anchor) >= theme.contrast_ratio(bg, light_anchor))
-    and dark_anchor
-    or light_anchor
+  local dark_ratio = theme.contrast_ratio(bg, dark_anchor)
+  local light_ratio = theme.contrast_ratio(bg, light_anchor)
+  local anchor = (dark_ratio >= light_ratio) and dark_anchor or light_anchor
+
+  -- 在中等灰背景 (L ≈ 0.16..0.21) 上，柔和深/浅锚点可能略低于 4.5；按需升级至纯黑/纯白确保数学上 100% 可达标
+  if theme.contrast_ratio(bg, anchor) < target_ratio then
+    local pure_black = 0x000000FF
+    local pure_white = 0xFFFFFFFF
+    anchor = (theme.contrast_ratio(bg, pure_black) >= theme.contrast_ratio(bg, pure_white))
+      and pure_black
+      or pure_white
+  end
 
   if type(fg_rgba) == "number" then
     local _, _, _, orig_a = theme.unpack_rgba(fg_rgba)
@@ -261,15 +271,16 @@ function theme.adapt_vivid_accent(bg_rgba, accent_rgba, min_ratio, is_light_bg)
   local r, g, b, a = theme.unpack_rgba(accent_rgba)
   local spread = math.max(r, g, b) - math.min(r, g, b)
   local h, s, l = theme.rgb_to_hsl(r, g, b)
-  if spread < 14 or s < 0.16 or l < 0.05 or l > 0.97 then
+  local is_pastel_tint = (l > 0.85 and spread >= 10 and s >= 0.22 and l <= 0.98)
+  if not is_pastel_tint and (spread < 14 or s < 0.16 or l < 0.05 or l > 0.97) then
     return nil, nil
   end
 
   local target_ratio = tonumber(min_ratio) or 3.2
   local boosted_s = is_light_bg and math.max(s, 0.52) or math.max(s, 0.56)
-  boosted_s = math.min(boosted_s, 0.86)
+  boosted_s = math.min(boosted_s, is_light_bg and 0.78 or 0.82)
 
-  local cur_l = is_light_bg and math.min(l, 0.52) or math.max(l, 0.58)
+  local cur_l = is_light_bg and math.min(l, 0.50) or math.max(l, 0.58)
   local candidate = theme.hsla(h, boosted_s, cur_l, a)
   if theme.contrast_ratio(bg_rgba, candidate) >= target_ratio then
     return candidate, h
@@ -296,10 +307,18 @@ end
 function theme.on_accent_text(accent_bg_rgba)
   local white = 0xFFFFFFFF
   local ink = 0x161A22FF
-  if theme.contrast_ratio(accent_bg_rgba, white) >= theme.contrast_ratio(accent_bg_rgba, ink) then
+  local w_ratio = theme.contrast_ratio(accent_bg_rgba, white)
+  local i_ratio = theme.contrast_ratio(accent_bg_rgba, ink)
+  if w_ratio >= i_ratio and w_ratio >= 4.5 then
     return white
+  elseif i_ratio > w_ratio and i_ratio >= 4.5 then
+    return ink
   end
-  return ink
+  local pure_black = 0x000000FF
+  if theme.contrast_ratio(accent_bg_rgba, pure_black) > w_ratio then
+    return pure_black
+  end
+  return white
 end
 
 --------------------------------------------------------------------------------
@@ -459,6 +478,7 @@ local function query_vivid_host_accent(r_api)
     "col_seltrack2",
     "col_seltrack",
     "col_main_hilite",
+    "col_tl_bgsel",
     "selitem_dot",
     "marqueezoom_outline",
     "marqueezoom_fill",
@@ -477,7 +497,8 @@ local function query_vivid_host_accent(r_api)
         local r, g, b = theme.unpack_rgba(rgba)
         local spread = math.max(r, g, b) - math.min(r, g, b)
         local _, s, l = theme.rgb_to_hsl(r, g, b)
-        if spread >= 14 and s >= 0.18 and l >= 0.05 and l <= 0.97 then
+        local is_pastel_tint = (l > 0.85 and spread >= 10 and s >= 0.22 and l <= 0.98)
+        if is_pastel_tint or (spread >= 14 and s >= 0.18 and l >= 0.05 and l <= 0.97) then
           return rgba, table.concat(sig_parts, ",")
         end
       end
@@ -752,8 +773,14 @@ function theme.build_host_palette(reaper_api)
       strip_accent = 0xD96BB8FF
     end
 
+    local row_bg_strip = theme.blend_rgba(card_base, strip_accent, 0.06)
+    local row_bg_hover = theme.blend_rgba(card_base, normal_accent, 0.14)
+    local row_bg_open = theme.blend_rgba(card_base, normal_accent, 0.22)
+
     safe_text = theme.ensure_contrast(host_bg, safe_text, theme.MIN_CONTRAST_RATIO)
     safe_text = theme.ensure_contrast(card_base, safe_text, theme.MIN_CONTRAST_RATIO)
+    safe_text = theme.ensure_contrast(row_bg_strip, safe_text, theme.MIN_CONTRAST_RATIO)
+    safe_text = theme.ensure_contrast(row_bg_open, safe_text, theme.MIN_CONTRAST_RATIO)
     safe_text = theme.ensure_contrast(frame_bg, safe_text, theme.MIN_CONTRAST_RATIO)
     safe_text = theme.ensure_contrast(button_bg, safe_text, theme.MIN_CONTRAST_RATIO)
     safe_text = theme.ensure_contrast(popup_bg, safe_text, theme.MIN_CONTRAST_RATIO)
@@ -776,6 +803,7 @@ function theme.build_host_palette(reaper_api)
     base.frame_bg_active = theme.blend_rgba(frame_bg, normal_accent, 0.26)
     base.title_bg = theme.blend_rgba(host_bg, 0x0B0D11FF, 0.30)
     base.title_bg_active = theme.blend_rgba(host_bg, normal_accent, 0.12)
+    base.title_bg_collapsed = theme.with_alpha(base.title_bg, 224)
     base.button = button_bg
     base.button_hovered = theme.blend_rgba(button_bg, normal_accent, 0.20)
     base.button_active = theme.blend_rgba(button_bg, normal_accent, 0.32)
@@ -798,6 +826,9 @@ function theme.build_host_palette(reaper_api)
     base.tab_active = theme.blend_rgba(host_bg, normal_accent, 0.22)
     base.tab_unfocused = host_bg
     base.tab_unfocused_active = theme.blend_rgba(host_bg, 0x2C3442FF, 0.45)
+    base.resize_grip = theme.with_alpha(normal_accent, 52)
+    base.resize_grip_hovered = theme.with_alpha(normal_accent, 136)
+    base.resize_grip_active = theme.with_alpha(normal_accent, 204)
     base.docking_preview = theme.with_alpha(normal_accent, 136)
     base.docking_empty_bg = base.child_bg
 
@@ -823,12 +854,12 @@ function theme.build_host_palette(reaper_api)
     base.master_off_bg_hover = base.button_hovered
     base.master_off_text = bypassed_text
 
-    base.row_bg_strip = theme.blend_rgba(card_base, strip_accent, 0.06)
+    base.row_bg_strip = row_bg_strip
     base.row_bg_normal = card_base
     base.row_border_strip = theme.blend_rgba(card_base, strip_accent, 0.22)
     base.row_border_normal = theme.blend_rgba(card_base, 0x4C576AFF, 0.34)
-    base.row_bg_hover = theme.blend_rgba(card_base, normal_accent, 0.14)
-    base.row_bg_open = theme.blend_rgba(card_base, normal_accent, 0.22)
+    base.row_bg_hover = row_bg_hover
+    base.row_bg_open = row_bg_open
     base.row_border_open = theme.with_alpha(normal_accent, 190)
     base.row_text = safe_text
     base.row_text_bypassed = bypassed_text
@@ -841,7 +872,7 @@ function theme.build_host_palette(reaper_api)
     base.knob_arc_strip = strip_accent
     base.knob_arc_normal = normal_accent
     base.knob_pointer = safe_text
-    base.knob_text = theme.blend_rgba(safe_text, host_bg, 0.18)
+    base.knob_text = theme.ensure_contrast(card_base, theme.blend_rgba(safe_text, host_bg, 0.18), 4.0)
     base.knob_text_active = base.row_slot_strip
     base.knob_text_normal_active = base.row_slot_normal
 
@@ -863,7 +894,10 @@ function theme.resolve_palette(settings, reaper_api)
   if type(settings) == "table" and settings.follow_host_theme then
     return theme.build_host_palette(reaper_api)
   end
-  return theme.get_studio_dark_palette()
+  if not theme._studio_dark_cache then
+    theme._studio_dark_cache = theme.get_studio_dark_palette()
+  end
+  return theme._studio_dark_cache
 end
 
 --- 获取当前帧活跃调色板（若尚未 push 则即时解析）
@@ -921,13 +955,13 @@ function theme.push(ctx, ImGui, settings, reaper_api)
       { "Col_ScrollbarGrabActive",   pal.scrollbar_grab_active },
       { "Col_Tab",                   pal.tab },
       { "Col_TabHovered",            pal.tab_hovered },
-      -- 兼容 ReaImGui 0.10 (TabSelected / TabDimmed) 与 0.9 (TabActive / TabUnfocused)
-      { "Col_TabSelected",           pal.tab_active },
-      { "Col_TabActive",             pal.tab_active },
-      { "Col_TabDimmed",             pal.tab_unfocused },
-      { "Col_TabUnfocused",          pal.tab_unfocused },
-      { "Col_TabDimmedSelected",     pal.tab_unfocused_active },
-      { "Col_TabUnfocusedActive",    pal.tab_unfocused_active },
+      -- 兼容 ReaImGui 0.10 (TabSelected / TabDimmed) 与 0.9 (TabActive / TabUnfocused)，避免双键并存时重复压栈
+      { (rawget(ImGui, "Col_TabSelected") ~= nil) and "Col_TabSelected" or "Col_TabActive",
+        pal.tab_active },
+      { (rawget(ImGui, "Col_TabDimmed") ~= nil) and "Col_TabDimmed" or "Col_TabUnfocused",
+        pal.tab_unfocused },
+      { (rawget(ImGui, "Col_TabDimmedSelected") ~= nil) and "Col_TabDimmedSelected" or "Col_TabUnfocusedActive",
+        pal.tab_unfocused_active },
       { "Col_ResizeGrip",            pal.resize_grip },
       { "Col_ResizeGripHovered",     pal.resize_grip_hovered },
       { "Col_ResizeGripActive",      pal.resize_grip_active },

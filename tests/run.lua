@@ -1477,6 +1477,296 @@ run_test("v0.2.0 UI 渲染栈平衡、顶层 Popup 作用域一致性、UTF-8 �
 end)
 
 --------------------------------------------------------------------------------
+-- 用例 16 (v0.2.1 UI 精修回归)：极端中灰 WCAG 兜底、极淡樱花粉、MIX 旋钮交互状态机、窄窗与防穿透
+--------------------------------------------------------------------------------
+run_test("v0.2.1 中灰 WCAG 兜底、极淡粉红/深色对比度、MIX 旋钮拖拽与双击 Undo、窄窗与拖拽 Tooltip 抑制", function(r)
+  -- 16.1 WCAG 极端中灰背景 (L ≈ 0.194) 与中等亮度强调色对比度数学兜底
+  local mid_gray = theme.rgba(122, 122, 122, 255)
+  local rescued_mid = theme.ensure_contrast(mid_gray, theme.rgba(130, 130, 130, 255), 4.5)
+  assert_true(theme.contrast_ratio(mid_gray, rescued_mid) >= 4.5, "ensure_contrast achieves >= 4.5 even on mid-gray L=0.194")
+
+  local mid_accent = theme.rgba(180, 118, 42, 255)
+  local on_mid = theme.on_accent_text(mid_accent)
+  assert_true(theme.contrast_ratio(mid_accent, on_mid) >= 4.5, "on_accent_text achieves >= 4.5 on mid-luminance accent")
+
+  -- 16.2 极淡樱花粉 (spread=12, L>0.85) 识别 + 深色宿主主题完整对比度 + 实时换肤自动刷新缓存
+  theme.clear_host_cache()
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(248, 248, 250),
+    col_main_text2 = r.ColorToNative(32, 36, 44),
+    col_tcp_bgsel = r.ColorToNative(254, 242, 246), -- 极淡樱花粉 (spread == 12)
+  })
+  local pastel_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(pastel_pal.mode, "host_light", "pastel pink skin detected as host_light")
+  assert_true(pastel_pal.host_accent_detected, "delicate pastel sakura-pink (spread=12) detected")
+  local pr, pg, pb = theme.unpack_rgba(pastel_pal.normal_accent)
+  local ph = theme.rgb_to_hsl(pr, pg, pb)
+  assert_true(ph >= 315 or ph <= 15, "pastel sakura-pink preserves rose hue")
+
+  -- 不调用 clear_host_cache 直接切换至深色宿主主题，验证指纹变化即时刷新且 row_bg_open/knob_text 对比度达标
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(48, 52, 60),
+    col_main_text2 = r.ColorToNative(62, 66, 74), -- 故意低对比文字
+    col_tcp_bgsel = r.ColorToNative(240, 120, 180), -- 明亮洋红点缀
+  })
+  local live_dark_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(live_dark_pal.mode, "host_dark", "live host theme switch refreshes cache automatically to host_dark")
+  assert_true(live_dark_pal.host_accent_detected, "host_dark vivid accent detected")
+  assert_true(theme.contrast_ratio(live_dark_pal.row_bg_open, live_dark_pal.row_text) >= 4.5, "host_dark row_bg_open text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(live_dark_pal.row_bg_strip, live_dark_pal.row_text) >= 4.5, "host_dark row_bg_strip text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(live_dark_pal.row_bg_normal, live_dark_pal.knob_text) >= 4.0, "host_dark knob_text contrast >= 4.0")
+
+  -- 验证 Col_TabSelected 与 Col_TabActive 同时存在时仅压栈一次
+  local tab_pushes = 0
+  local dual_tab_imgui = setmetatable({
+    Col_TabSelected = 30,
+    Col_TabActive = 31,
+    PushStyleColor = function() tab_pushes = tab_pushes + 1 end,
+    PopStyleColor = function(_c, n) tab_pushes = tab_pushes - (tonumber(n) or 1) end,
+  }, {
+    __index = function(_, key)
+      error("strict dual-tab metatable violation: " .. tostring(key))
+    end,
+  })
+  local c_cnt, v_cnt = theme.push("ctx", dual_tab_imgui, { follow_host_theme = false }, r)
+  assert_eq(c_cnt, 1, "dual Col_TabSelected/Col_TabActive pushes exactly once")
+  theme.pop("ctx", dual_tab_imgui, c_cnt, v_cnt)
+  assert_eq(tab_pushes, 0, "dual tab stack balanced")
+
+  -- 16.3 MIX 圆弧旋钮交互状态机（拖拽实时调参不刷 Undo -> 松手单步 Undo 基线恢复 -> Shift 微调 -> 双击重置 100%）
+  local tr = r.mock_add_track("Knob Interaction Track")
+  core.add_fx_to_strip(tr, "VST3: ReaComp (Cockos)")
+  local vm = core.build_view_model(tr)
+  local fx_guid = vm.strip.children[1].guid
+  assert_eq(vm.strip.children[1].wet_percent, 100, "initial wet is 100%")
+
+  local function make_interactive_imgui(cfg)
+    cfg = cfg or {}
+    local st = {
+      color_depth = 0,
+      var_depth = 0,
+      id_depth = 0,
+      clip_depth = 0,
+      win_depth = 0,
+      child_depth = 0,
+      popup_depth = 0,
+      group_depth = 0,
+      wrap_depth = 0,
+      tooltip_count = 0,
+      rect_fills = {},
+      last_item = "",
+    }
+    local dl = { _mock_dl = true }
+    local api = {
+      _st = st,
+      Cond_FirstUseEver = 4,
+      Cond_Always = 1,
+      WindowFlags_None = 0,
+      ChildFlags_Borders = 1,
+      MouseButton_Left = 0,
+      MouseCursor_Hand = 7,
+      MouseCursor_ResizeNS = 3,
+      Mod_Shift = 1,
+      Col_Text = 1,
+      Col_WindowBg = 2,
+      Col_ChildBg = 3,
+      Col_Button = 4,
+      Col_ButtonHovered = 5,
+      Col_ButtonActive = 6,
+      StyleVar_WindowRounding = 1,
+      StyleVar_WindowPadding = 2,
+      SetNextWindowSize = function() end,
+      SetNextWindowDockID = function() end,
+      SetNextItemWidth = function() end,
+      SetKeyboardFocusHere = function() end,
+      SetMouseCursor = function() end,
+      PushStyleColor = function() st.color_depth = st.color_depth + 1 end,
+      PopStyleColor = function(_c, n) st.color_depth = st.color_depth - (tonumber(n) or 1) end,
+      PushStyleVar = function() st.var_depth = st.var_depth + 1 end,
+      PopStyleVar = function(_c, n) st.var_depth = st.var_depth - (tonumber(n) or 1) end,
+      PushID = function() st.id_depth = st.id_depth + 1 end,
+      PopID = function() st.id_depth = st.id_depth - 1 end,
+      BeginGroup = function() st.group_depth = st.group_depth + 1 end,
+      EndGroup = function() st.group_depth = st.group_depth - 1 end,
+      PushTextWrapPos = function() st.wrap_depth = st.wrap_depth + 1 end,
+      PopTextWrapPos = function() st.wrap_depth = st.wrap_depth - 1 end,
+      Begin = function()
+        st.win_depth = st.win_depth + 1
+        return true, true
+      end,
+      End = function() st.win_depth = st.win_depth - 1 end,
+      BeginChild = function()
+        st.child_depth = st.child_depth + 1
+        return true
+      end,
+      EndChild = function() st.child_depth = st.child_depth - 1 end,
+      IsWindowDocked = function() return false end,
+      IsWindowHovered = function() return cfg.window_hovered ~= false end,
+      GetWindowDockID = function() return 0 end,
+      GetWindowDrawList = function() return dl end,
+      GetCursorScreenPos = function() return 10, 20 end,
+      GetCursorPosX = function() return 8 end,
+      GetCursorPosY = function() return 12 end,
+      SetCursorPosX = function() end,
+      SetCursorPosY = function() end,
+      GetContentRegionAvail = function() return cfg.avail_w or 240, 500 end,
+      GetFrameHeight = function() return 20 end,
+      GetTextLineHeight = function() return 14 end,
+      CalcTextSize = function(_c, txt) return #tostring(txt or "") * 5, 14 end,
+      SameLine = function() end,
+      Spacing = function() end,
+      Separator = function() end,
+      AlignTextToFramePadding = function() end,
+      Text = function() end,
+      TextDisabled = function() end,
+      Button = function()
+        st.last_item = "button"
+        return false
+      end,
+      InvisibleButton = function(_c, id)
+        st.last_item = tostring(id or "")
+        return false
+      end,
+      Checkbox = function(_c, _l, v) return false, v end,
+      Selectable = function() return false end,
+      InputTextWithHint = function(_c, _l, _h, v) return false, v end,
+      TreeNode = function() return false end,
+      TreePop = function() end,
+      SetNextItemOpen = function() end,
+      IsItemHovered = function()
+        if cfg.hover_all then
+          return true
+        end
+        return cfg.knob_hovered and st.last_item == "##row_wet_knob" or false
+      end,
+      IsItemActive = function()
+        return cfg.knob_active and st.last_item == "##row_wet_knob" or false
+      end,
+      IsItemDeactivated = function()
+        return cfg.knob_deactivated and st.last_item == "##row_wet_knob" or false
+      end,
+      IsMouseHoveringRect = function() return cfg.mouse_in_rect and true or false end,
+      IsMouseDoubleClicked = function()
+        return cfg.knob_dblclick and st.last_item == "##row_wet_knob" or false
+      end,
+      GetItemRectMin = function() return 10, 20 end,
+      GetItemRectMax = function() return 130, 44 end,
+      GetMouseDelta = function() return 0, cfg.mouse_dy or 0 end,
+      GetKeyMods = function() return cfg.shift_held and 1 or 0 end,
+      BeginDragDropSource = function()
+        return cfg.drag_source and st.last_item == "##row_name" or false
+      end,
+      SetDragDropPayload = function() end,
+      EndDragDropSource = function() end,
+      BeginDragDropTarget = function() return false end,
+      AcceptDragDropPayload = function() return false, nil end,
+      EndDragDropTarget = function() end,
+      BeginPopupContextItem = function() return false end,
+      OpenPopup = function() end,
+      BeginPopup = function(_c, name)
+        if cfg.open_browser and name == "reapch_fx_browser_popup" then
+          st.popup_depth = st.popup_depth + 1
+          return true
+        end
+        return false
+      end,
+      EndPopup = function() st.popup_depth = st.popup_depth - 1 end,
+      CloseCurrentPopup = function() end,
+      BeginTooltip = function()
+        st.tooltip_count = st.tooltip_count + 1
+        return true
+      end,
+      EndTooltip = function() end,
+      DrawList_AddRectFilled = function(_dl, _x1, _y1, _x2, _y2, col)
+        st.rect_fills[#st.rect_fills + 1] = col
+      end,
+      DrawList_AddRect = function() end,
+      DrawList_AddLine = function() end,
+      DrawList_AddCircle = function() end,
+      DrawList_AddCircleFilled = function() end,
+      DrawList_AddText = function() end,
+      DrawList_PathClear = function() end,
+      DrawList_PathArcTo = function() end,
+      DrawList_PathStroke = function() end,
+      DrawList_PushClipRect = function() st.clip_depth = st.clip_depth + 1 end,
+      DrawList_PopClipRect = function() st.clip_depth = st.clip_depth - 1 end,
+    }
+    return setmetatable(api, {
+      __index = function(_, key)
+        error("strict v0.2.1 metatable violation: unguarded access to " .. tostring(key))
+      end,
+    })
+  end
+
+  local undo_before = #r._state.undo_history
+  -- 帧 1：按住旋钮向下拖拽 57.5px（115px 满量程 -> 100% 降至 50%，不刷 Undo）
+  local ig_drag1 = make_interactive_imgui({ knob_active = true, knob_hovered = true, mouse_dy = 57.5 })
+  ui.draw("ctx", ig_drag1, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_before, "knob drag does not spam Undo history")
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].wet_percent, 50, "knob drag updated wet to 50%")
+
+  -- 帧 2：按住 Shift 微调向下 46px（460px 满量程 -> 再降 10% 至 40%，仍不刷 Undo）
+  local ig_drag2 = make_interactive_imgui({ knob_active = true, knob_hovered = true, mouse_dy = 46.0, shift_held = true })
+  ui.draw("ctx", ig_drag2, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_before, "Shift fine-tune drag still does not spam Undo")
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].wet_percent, 40, "Shift 4x fine-tune updated wet to 40%")
+
+  -- 帧 3：松手释放 -> 仅产生 1 条干净 Undo，且 begin_wet == 1.0, end_wet == 0.4
+  local ig_rel = make_interactive_imgui({ knob_active = false, knob_deactivated = true })
+  ui.draw("ctx", ig_rel, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_before + 1, "knob release commits exactly 1 Undo block")
+  local blk = r._state.undo_blocks[#r._state.undo_blocks]
+  assert_true(math.abs((blk.begin_wet[fx_guid] or 0) - 1.0) < 1e-4, "Undo block captured pre-drag 1.0 baseline")
+  assert_true(math.abs((blk.end_wet[fx_guid] or 0) - 0.4) < 1e-4, "Undo block captured final 0.4 wet")
+
+  -- 帧 4：双击旋钮重置为 100% -> 记录 1 条 Undo (0.4 -> 1.0)
+  local ig_dbl = make_interactive_imgui({ knob_hovered = true, knob_active = true, knob_dblclick = true })
+  ui.draw("ctx", ig_dbl, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_before + 2, "double-click reset commits 1 Undo block")
+  vm = core.build_view_model(tr)
+  assert_eq(vm.strip.children[1].wet_percent, 100, "double-click reset wet to 100%")
+
+  -- 帧 5：已是 100% 时再次双击不产生无意义 Undo
+  local ig_dbl_noop = make_interactive_imgui({ knob_hovered = true, knob_active = false, knob_dblclick = true })
+  ui.draw("ctx", ig_dbl_noop, vm, { follow_host_theme = false }, function() end)
+  assert_eq(#r._state.undo_history, undo_before + 2, "double-click at 100% does not create no-op Undo")
+
+  -- 16.4 超窄 Split Dock (140px) + 展开自定义分组弹窗 + 拖拽期间 Tooltip 抑制 + 弹窗遮挡行悬停防穿透
+  ui._show_custom_group_editor = true
+  local ig_narrow = make_interactive_imgui({
+    avail_w = 140,
+    open_browser = true,
+    window_hovered = false,
+    mouse_in_rect = true,
+  })
+  ui.draw("ctx", ig_narrow, vm, { follow_host_theme = false }, function() end)
+  assert_eq(ig_narrow._st.group_depth, 0, "BeginGroup/EndGroup balanced")
+  assert_eq(ig_narrow._st.wrap_depth, 0, "PushTextWrapPos/PopTextWrapPos balanced")
+  assert_eq(ig_narrow._st.color_depth, 0, "narrow + custom editor color stack balanced")
+  assert_eq(ig_narrow._st.popup_depth, 0, "narrow + custom editor popup stack balanced")
+  local studio_pal = theme.get_studio_dark_palette()
+  local found_hover_bleed = false
+  for _, col in ipairs(ig_narrow._st.rect_fills) do
+    if col == studio_pal.row_bg_hover then
+      found_hover_bleed = true
+    end
+  end
+  assert_false(found_hover_bleed, "row_bg_hover suppressed when window is occluded by popup")
+  ui._show_custom_group_editor = false
+
+  -- 拖拽 FX 期间悬停各控件不得触发 Tooltip 污染 DragDropSource 预览
+  ui._active_dnd_zone = "strip"
+  ui._active_dnd_slot = 1
+  local ig_dnd = make_interactive_imgui({ hover_all = true, drag_source = true })
+  ui.draw("ctx", ig_dnd, vm, { follow_host_theme = false }, function() end)
+  assert_eq(ig_dnd._st.tooltip_count, 0, "zero hover tooltips emitted while dragging FX")
+  ui._active_dnd_zone = nil
+  ui._active_dnd_slot = nil
+end)
+
+--------------------------------------------------------------------------------
 -- 汇总结果与退出码
 --------------------------------------------------------------------------------
 _G.reaper = host_reaper
