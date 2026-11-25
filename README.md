@@ -35,9 +35,9 @@
   - **修复**：中灰/浅灰及位图主题配色异常、窄窗横滚溢出与按钮行距漂移、拖拽默认黄框/遮挡与取消误开窗、MIX 旋钮微抖误写 Undo 与跨行高亮穿透。
 - **`v0.2.0`**（核心操作闭环）
   - **新增**：双区独立 `+ 添加` 分组搜索弹窗（默认隐藏乐器、支持 REAPER 文件夹 / A–Z 分类 / 自定义分组）、单行 MIX 圆弧旋钮、区内/跨区双向拖拽排序、Studio Dark 与实验性跟随宿主主题。
-  - **修复**：运行内新增 DX 插件刷新兜底与 4 个 `DXi:` 音频效果器豁免、Wet/Dry 拖拽一步 Undo 基线恢复及弹窗作用域异常。
+  - **修复**：运行中启用 DX 插件无法刷新显示、4 个 `DXi:` 音频效果器被误当乐器隐藏、Wet/Dry 拖拽拆分多步 Undo，以及弹窗 ID 作用域异常。
 - **`v0.1.0`**（基础版本）
-  - **新增**：0 号位 `Channel Strip` 容器持久识别与按需初始化、常规 FX 槽 `1..N` 映射、MCP 偏离检测与一键归位、ReaImGui 可停靠面板与一键停靠 Docker。
+  - **新增**：0 号位 `Channel Strip` 容器持久识别与按需初始化、常规 FX 槽 `1..N` 映射、双区 Bypass 与插件悬浮窗切换、MCP 偏离检测与一键/自动归位、ReaImGui 可停靠面板与一键停靠 Docker。
 
 ---
 
@@ -69,12 +69,12 @@
 
 - **`v0.2.1`**（UI ポリッシュ）
   - **追加**：ライト／カラー系ホストテーマ向け HSL 色相保持と全グレースケール WCAG コントラスト保証、上部固定トラックバー、ハードウェア風カプセル一括 Bypass、UTF-8 安全省略表示、狭幅 Split Dock 向けコンパクトレイアウト。
-  - **修正**：中間グレーやビットマップ系テーマでの配色崩れ、狭幅時の横スクロール溢れ・ボタン行間ずれ、ドラッグ時のデフォルト黄枠／重なり描画やキャンセル時誤オープン、MIX ノブの微ブレ Undo 記録および他行ホバー貫通。
+  - **修正**：中間グレー・ライトグレーやビットマップ系テーマでの配色崩れ、狭幅時の横スクロール溢れ・ボタン行間ずれ、ドラッグ時のデフォルト黄枠／重なり描画やキャンセル時誤オープン、MIX ノブの微ブレ Undo 記録および他行ホバー貫通。
 - **`v0.2.0`**（コア操作ループ）
   - **追加**：ゾーン別 `+` グループ検索ポップアップ（インストゥルメント既定非表示、REAPER フォルダ／A–Z カテゴリ／カスタムグループ対応）、行内 MIX ロータリーノブ、ゾーン内／ゾーン間双方向ドラッグ移動、Studio Dark および実験的ホストテーマ追従。
-  - **修正**：実行中に有効化した DX プラグインの再読込フォールバックと `DXi:` エフェクト 4 種の除外回避、Wet/Dry ドラッグの単一 Undo 復元、ポップアップのスコープ不具合。
+  - **修正**：実行中に有効化した DX プラグインが一覧へ反映されない問題、`DXi:` オーディオエフェクト 4 種が楽器として誤除外される問題、Wet/Dry ドラッグ時の Undo 分割、ポップアップの ID スコープ不具合。
 - **`v0.1.0`**（初期リリース）
-  - **追加**：スロット 0 `Channel Strip` コンテナの永続識別とオンデマンド初期化、通常 FX スロット `1..N` マッピング、MCP 位置ずれ検出・ワンクリック復帰、ReaImGui ドッキングパネルおよびワンクリック Docker ドッキング。
+  - **追加**：スロット 0 `Channel Strip` コンテナの永続識別とオンデマンド初期化、通常 FX スロット `1..N` マッピング、両ゾーンの Bypass およびプラグインウィンドウ開閉、MCP 位置ずれ検出とワンクリック／自動復帰、ReaImGui ドッキングパネルおよびワンクリック Docker ドッキング。
 
 ---
 
@@ -106,9 +106,9 @@ A lightweight, left-dockable dual-zone FX Inspector for **REAPER 7** (Lua ReaScr
 
 - **`v0.2.1`** (UI Polish)
   - **Added**: HSL hue-preserving accent adaptation and full-grayscale WCAG contrast safeguards for light/colorful host themes, sticky top track bar, hardware capsule master bypass, UTF-8-safe ellipsis truncation, and compact layout for narrow Split Docks.
-  - **Fixed**: Color distortion on mid-gray/bitmap themes, narrow-window horizontal overflow and button baseline drift, default yellow DnD rectangle / Z-order clipping / accidental window open on cancelled drag, and MIX knob micro-jitter Undo spam & cross-row hover bleed.
+  - **Fixed**: Color distortion on mid-/light-gray and bitmap themes, narrow-window horizontal overflow and button baseline drift, default yellow DnD rectangle / Z-order clipping / accidental window open on cancelled drag, and MIX knob micro-jitter Undo spam & cross-row hover bleed.
 - **`v0.2.0`** (Core Workflow)
   - **Added**: Per-zone grouped `+` FX browser popup (instruments hidden by default, REAPER folders / A–Z categories / custom groups), per-row MIX arc knob, bidirectional intra-/cross-zone drag-and-drop, Studio Dark theme, and experimental host-theme sync.
-  - **Fixed**: Runtime DX plugin INI refresh fallback and exemptions for 4 `DXi:` audio effects, single-step pre-drag Undo baseline for Wet/Dry edits, and popup ID scoping.
+  - **Fixed**: Newly enabled DX plugins missing on runtime refresh, 4 `DXi:` audio effects misclassified as instruments, multi-step Undo spam during Wet/Dry drags, and popup ID scoping issues.
 - **`v0.1.0`** (Initial MVP)
-  - **Added**: Persistent Slot 0 `Channel Strip` container tracking and on-demand initialization, regular FX slot `1..N` mapping, MCP displacement detection with one-click snap-back, and dockable ReaImGui panel with one-click Docker docking.
+  - **Added**: Persistent Slot 0 `Channel Strip` container tracking and on-demand initialization, regular FX slot `1..N` mapping, dual-zone bypass and floating FX window toggle, MCP displacement detection with one-click/auto snap-back, and dockable ReaImGui panel with one-click Docker docking.
