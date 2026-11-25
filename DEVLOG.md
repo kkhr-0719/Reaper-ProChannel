@@ -5,7 +5,7 @@
 - **前置环境**：
   - `docs/imgui.lua`：已确认，本机 ReaImGui 动态垫片（`reaper_imgui-x64` `v0.10.0.5`），支持 `require 'imgui' '0.10'`（向下兼容 `'0.9'`）；垫片在加载时已对 `flags & 1 ~= 0` 的枚举常量预求值，且遵循 ReaImGui 0.9/0.10 规范仅在 `ImGui.Begin` / `ImGui.BeginChild` 返回 `visible == true` 时调用 `ImGui.End` / `ImGui.EndChild`。
   - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；现已扩展至 **17 组**边界与 UI 集成单元测试用例（含用例 14b 白/浅灰+樱花粉宿主 HSL 色相保持与第三方位图占位黑容错、用例 15 严格 `docs/imgui.lua` 元表下 `ui.draw` 全流程栈平衡与 UTF-8 截断、用例 16 中灰 WCAG 兜底/MIX 旋钮状态机/超窄窗与拖拽 Tooltip 防穿透，以及用例 17 全灰度 0..255 边界中灰与中浅灰完整表面对比度、`Col_DragDropTarget` + `AcceptNoDrawDefaultRect` 去默认黄框与顶层 DnD Z-Order 顺序、旋钮 1.5px 防手抖/跨行 Hover 隔离、拖拽取消防误开窗及 120px 极窄按钮收敛回归）。
-  - **Git 仓库状态**：当前在 `feat/v0.2.1-ui-polish` 分支开发提交（从本地 `feat/v0.2.0-core-loop` 切出），未获用户验收与明确指令前不合并 `main`、不执行 `git push`。
+  - **Git 仓库状态**：当前在 `feat/v0.2.1-ui-polish` 分支开发提交（基于 `feat/v0.2.0-core-loop`）；已按用户明文指令将 `README.md` 重写为极简终端用户版、新增 `.gitignore` 忽略 `AGENTS.md`，并改写全部分支本地提交历史移除 `AGENTS.md`（本地磁盘 `AGENTS.md` 逐字节无损保留）；尝试以 `GIT_TERMINAL_PROMPT=0` + `GCM_INTERACTIVE=never` 强推 `feat/v0.2.0-core-loop` 至远端时因非交互式认证凭据缺失已立即中止，待用户交互式执行 `git push --force origin feat/v0.2.0-core-loop` 完成 GitHub 同步。未获用户验收与明确指令前不合并 `main`、不推送 `feat/v0.2.1-ui-polish`。
 
 ## 已完成（`v0.2.1` UI 调试、缺陷修复与质感精修）
 - **`src/theme.lua`（HSL 宿主彩色点缀承接、浅色主题清爽层次、极端中灰数学兜底与完整 ImGui 控件染色）**：
