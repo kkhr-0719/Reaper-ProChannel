@@ -24,6 +24,7 @@ package.path = table.concat({
 local mock_reaper = require("mock_reaper")
 local core = require("core")
 local theme = require("theme")
+local ui = require("ui")
 
 local output_lines = {}
 local function log_line(msg)
@@ -1161,7 +1162,43 @@ run_test("v0.2.0 theme.lua 颜色打包/解包、GetThemeColor 转换、WCAG 对
   assert_true(theme.contrast_ratio(light_pal.button, light_pal.text) >= 4.5, "host_light button vs text contrast >= 4.5")
   assert_true(theme.contrast_ratio(light_pal.popup_bg, light_pal.text) >= 4.5, "host_light popup vs text contrast >= 4.5")
 
+  -- 14.5b 明亮白/浅灰底 + 粉红点缀自定义皮肤（HSL 色相保持、不退化脏灰/硬编码蓝，含极浅樱花粉与第三方位图占位黑容错）
+  local ph, ps, pl = theme.rgb_to_hsl(244, 143, 177)
+  assert_true(ph >= 330 and ph <= 350, "pink RGB->HSL hue in rose-pink range")
+  local pr, pg, pb = theme.hsl_to_rgb(ph, ps, pl)
+  assert_true(math.abs(pr - 244) <= 2 and math.abs(pg - 143) <= 2 and math.abs(pb - 177) <= 2, "HSL->RGB roundtrip precision")
+
+  theme.clear_host_cache()
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(245, 245, 248),   -- 干净浅灰白底
+    col_main_text2 = r.ColorToNative(42, 46, 54),
+    col_tcp_bgsel = r.ColorToNative(253, 230, 238),  -- 极浅樱花粉选中底色
+  })
+  local pink_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(pink_pal.mode, "host_light", "white/light-gray + cherry-pink skin detected as host_light")
+  assert_true(pink_pal.host_accent_detected, "cherry-pink host accent detected")
+  local ar, ag, ab = theme.unpack_rgba(pink_pal.normal_accent)
+  local ah, as = theme.rgb_to_hsl(ar, ag, ab)
+  assert_true(ah >= 315 or ah <= 15, "adapted normal_accent preserves rose-pink hue instead of hardcoded blue")
+  assert_true(as >= 0.45, "adapted normal_accent keeps vivid saturation without turning muddy gray")
+  assert_true(theme.contrast_ratio(pink_pal.row_bg_normal, pink_pal.normal_accent) >= 3.2, "pink normal_accent contrast >= 3.2")
+  assert_true(theme.contrast_ratio(pink_pal.row_bg_open, pink_pal.row_text) >= 4.5, "pink row_bg_open text contrast >= 4.5")
+  assert_true(theme.contrast_ratio(pink_pal.master_on_bg, pink_pal.master_on_text) >= 4.5, "master ON pill text contrast >= 4.5")
+
+  -- 第三方 PNG 位图浅色皮肤占位黑 (col_main_bg2 = #000000，但 tcp_bg 与 editbk 为浅灰白) 容错
+  theme.clear_host_cache()
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(0, 0, 0),
+    col_tcp_bg = r.ColorToNative(240, 242, 246),
+    col_main_editbk = r.ColorToNative(255, 255, 255),
+    col_main_text2 = -1,
+  })
+  local bitmap_light_pal = theme.resolve_palette({ follow_host_theme = true }, r)
+  assert_eq(bitmap_light_pal.mode, "host_light", "recovers host_light when bitmap skin leaves col_main_bg2 as placeholder black")
+  assert_true(theme.contrast_ratio(bitmap_light_pal.window_bg, bitmap_light_pal.text) >= 4.5, "bitmap light skin text contrast >= 4.5")
+
   -- 14.6 深色宿主主题自适应与缺失主题色回退
+  theme.clear_host_cache()
   r.mock_set_theme_colors({
     col_main_bg2 = r.ColorToNative(34, 38, 44),
     col_main_text2 = -1, -- 缺失文字色
@@ -1171,6 +1208,7 @@ run_test("v0.2.0 theme.lua 颜色打包/解包、GetThemeColor 转换、WCAG 对
   assert_false(dark_host_pal.is_light, "host_dark is_light == false")
   assert_true(theme.contrast_ratio(dark_host_pal.window_bg, dark_host_pal.text) >= 4.5, "host_dark fallback text contrast >= 4.5")
 
+  theme.clear_host_cache()
   r.mock_set_theme_colors({})
   local fallback_pal = theme.resolve_palette({ follow_host_theme = true }, r)
   assert_eq(fallback_pal.mode, "studio_dark", "falls back to studio_dark when GetThemeColor returns -1 for all keys")
@@ -1220,6 +1258,222 @@ run_test("v0.2.0 theme.lua 颜色打包/解包、GetThemeColor 转换、WCAG 对
   theme.pop("mock_ctx", mock_imgui, pushed_cols, pushed_vars)
   assert_eq(color_stack, 0, "color_stack balanced to 0 after theme.pop")
   assert_eq(var_stack, 0, "var_stack balanced to 0 after theme.pop")
+end)
+
+--------------------------------------------------------------------------------
+-- 用例 15 (UI 调试回归)：ui.draw 严格 ReaImGui 0.10 元表渲染、栈平衡、Popup ID 作用域与 UTF-8 安全截断
+--------------------------------------------------------------------------------
+run_test("v0.2.0 UI 渲染栈平衡、顶层 Popup 作用域一致性、UTF-8 截断与跨轨旋钮状态清理", function(r)
+  local function make_strict_imgui(opts)
+    opts = opts or {}
+    local st = {
+      color_depth = 0,
+      var_depth = 0,
+      id_depth = 0,
+      clip_depth = 0,
+      win_depth = 0,
+      child_depth = 0,
+      popup_depth = 0,
+      opened_popups = {},
+      began_popups = {},
+      draw_calls = 0,
+    }
+    local dl = { _mock_dl = true }
+    local api = {
+      _st = st,
+      Cond_FirstUseEver = 4,
+      Cond_Always = 1,
+      WindowFlags_None = 0,
+      MouseButton_Left = 0,
+      MouseCursor_Hand = 7,
+      MouseCursor_ResizeNS = 3,
+      Mod_Shift = 1,
+      Col_Text = 1,
+      Col_TextDisabled = 2,
+      Col_WindowBg = 3,
+      Col_ChildBg = 4,
+      Col_PopupBg = 5,
+      Col_Border = 6,
+      Col_Button = 7,
+      Col_ButtonHovered = 8,
+      Col_ButtonActive = 9,
+      Col_TabSelected = 10,
+      Col_ScrollbarGrab = 11,
+      StyleVar_WindowRounding = 1,
+      StyleVar_WindowPadding = 2,
+      SetNextWindowSize = function() end,
+      SetNextWindowDockID = function() end,
+      SetNextItemWidth = function() end,
+      SetKeyboardFocusHere = function() end,
+      SetMouseCursor = function() end,
+      PushStyleColor = function() st.color_depth = st.color_depth + 1 end,
+      PopStyleColor = function(_c, n) st.color_depth = st.color_depth - (tonumber(n) or 1) end,
+      PushStyleVar = function() st.var_depth = st.var_depth + 1 end,
+      PopStyleVar = function(_c, n) st.var_depth = st.var_depth - (tonumber(n) or 1) end,
+      PushID = function() st.id_depth = st.id_depth + 1 end,
+      PopID = function() st.id_depth = st.id_depth - 1 end,
+      Begin = function()
+        st.win_depth = st.win_depth + 1
+        return true, true
+      end,
+      End = function() st.win_depth = st.win_depth - 1 end,
+      BeginChild = function(_c, id)
+        if opts.collapse_body and id == "##reapch_body_scroll" then
+          return false
+        end
+        st.child_depth = st.child_depth + 1
+        return true
+      end,
+      EndChild = function() st.child_depth = st.child_depth - 1 end,
+      IsWindowDocked = function() return false end,
+      GetWindowDockID = function() return 0 end,
+      GetWindowDrawList = function() return dl end,
+      GetCursorScreenPos = function() return 10, 20 end,
+      GetCursorPosX = function() return 8 end,
+      GetCursorPosY = function() return 12 end,
+      SetCursorPosX = function() end,
+      SetCursorPosY = function() end,
+      GetContentRegionAvail = function() return opts.avail_w or 240, 500 end,
+      GetFrameHeight = function() return 20 end,
+      GetTextLineHeight = function() return 14 end,
+      CalcTextSize = function(_c, txt)
+        -- 简化模拟：每个字节约 5px（用于稳定验证 UTF-8 截断与布局宽度）
+        return #tostring(txt or "") * 5, 14
+      end,
+      SameLine = function() end,
+      Spacing = function() end,
+      Separator = function() end,
+      AlignTextToFramePadding = function() end,
+      Text = function() end,
+      TextDisabled = function() end,
+      TextWrapped = function() end,
+      Button = function(_c, label)
+        if opts.click_strip_add and label == "+ 添加##strip_add_fx_btn" then
+          return true
+        end
+        return false
+      end,
+      InvisibleButton = function() return false end,
+      Checkbox = function(_c, _l, v) return false, v end,
+      Selectable = function() return false end,
+      InputTextWithHint = function(_c, _l, _h, v) return false, v end,
+      TreeNode = function() return false end,
+      TreePop = function() end,
+      SetNextItemOpen = function() end,
+      IsItemHovered = function() return false end,
+      IsItemActive = function() return false end,
+      IsItemDeactivated = function() return false end,
+      IsMouseHoveringRect = function() return false end,
+      IsMouseDoubleClicked = function() return false end,
+      GetItemRectMin = function() return 10, 20 end,
+      GetItemRectMax = function() return 160, 44 end,
+      GetMouseDelta = function() return 0, 0 end,
+      GetKeyMods = function() return 0 end,
+      BeginDragDropSource = function() return false end,
+      EndDragDropSource = function() end,
+      BeginDragDropTarget = function() return false end,
+      EndDragDropTarget = function() end,
+      BeginPopupContextItem = function() return false end,
+      OpenPopup = function(_c, name)
+        st.opened_popups[name] = { child_depth = st.child_depth, id_depth = st.id_depth }
+      end,
+      BeginPopup = function(_c, name)
+        st.began_popups[name] = { child_depth = st.child_depth, id_depth = st.id_depth }
+        if opts.open_browser and name == "reapch_fx_browser_popup" then
+          st.popup_depth = st.popup_depth + 1
+          return true
+        end
+        return false
+      end,
+      EndPopup = function() st.popup_depth = st.popup_depth - 1 end,
+      CloseCurrentPopup = function() end,
+      BeginTooltip = function() return false end,
+      EndTooltip = function() end,
+      DrawList_AddRectFilled = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_AddRect = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_AddLine = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_AddCircle = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_AddCircleFilled = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_AddText = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_PathClear = function() end,
+      DrawList_PathArcTo = function() end,
+      DrawList_PathStroke = function() st.draw_calls = st.draw_calls + 1 end,
+      DrawList_PushClipRect = function() st.clip_depth = st.clip_depth + 1 end,
+      DrawList_PopClipRect = function() st.clip_depth = st.clip_depth - 1 end,
+    }
+    return setmetatable(api, {
+      __index = function(_, key)
+        error("strict ReaImGui 0.10 metatable violation in ui.lua: unguarded access to field " .. tostring(key))
+      end,
+    })
+  end
+
+  local function assert_stacks_zero(imgui_mock, label)
+    local st = imgui_mock._st
+    assert_eq(st.color_depth, 0, label .. ": color stack balanced")
+    assert_eq(st.var_depth, 0, label .. ": var stack balanced")
+    assert_eq(st.id_depth, 0, label .. ": id stack balanced")
+    assert_eq(st.clip_depth, 0, label .. ": clip rect stack balanced")
+    assert_eq(st.win_depth, 0, label .. ": Begin/End balanced")
+    assert_eq(st.child_depth, 0, label .. ": BeginChild/EndChild balanced")
+    assert_eq(st.popup_depth, 0, label .. ": BeginPopup/EndPopup balanced")
+  end
+
+  -- 15.1 UTF-8 安全截断校验（绝不在 3 字节中文字符中间切开导致乱码）
+  local mock_ui = make_strict_imgui()
+  local cn_str = "人声主通道压缩与染色插件测试超长名称"
+  local fitted, truncated = ui._fit_text_with_ellipsis("ctx", mock_ui, cn_str, 70)
+  assert_true(truncated, "long Chinese name marked truncated")
+  assert_true(fitted:sub(-3) == "...", "truncated text ends with ...")
+  local prefix_part = fitted:sub(1, #fitted - 3)
+  -- 每个中文字符占 3 字节，截断后的前缀字节数必须能被 3 整除（完整 UTF-8 字符边界）
+  assert_eq(#prefix_part % 3, 0, "UTF-8 Chinese prefix cut strictly on character boundary")
+
+  -- 15.2 构造多状态轨道（双区多插件、超长插件名、Bypass、悬浮窗开启、偏离提示条）并在浅色粉红皮肤下完整渲染
+  r.mock_set_theme_colors({
+    col_main_bg2 = r.ColorToNative(246, 246, 249),
+    col_tcp_bgsel = r.ColorToNative(244, 143, 177),
+  })
+  local tr1 = r.mock_add_track("Lead Vocal 超长轨道名测试 Track 01")
+  core.add_fx_to_strip(tr1, "VST3: SSL G-Master Buss Compressor Stereo (Waves)")
+  core.add_fx_to_strip(tr1, "VST3: 人声染色电子管前级 (MockDev)")
+  core.add_normal_fx(tr1, "VST3: ValhallaVintageVerb (Valhalla DSP)")
+  local vm1 = core.build_view_model(tr1)
+  core.set_fx_enabled(tr1, vm1.strip.children[2].fx_id, false)
+  core.toggle_fx_floating_window(tr1, vm1.strip.children[1].fx_id)
+  -- 制造 MCP 偏离状态，触发 warning_card 渲染分支
+  r.TrackFX_CopyToTrack(tr1, 0, tr1, 1, true)
+  vm1 = core.build_view_model(tr1)
+
+  -- 点击 BeginChild 内部 "+ 添加" 按钮，校验 OpenPopup 与 BeginPopup 均在顶层 child_depth == 0 / id_depth == 0 调用
+  local imgui_click = make_strict_imgui({ click_strip_add = true, open_browser = true, avail_w = 220 })
+  local open_ok = ui.draw("ctx", imgui_click, vm1, { follow_host_theme = true }, function() end)
+  assert_true(open_ok, "ui.draw returns open == true")
+  assert_stacks_zero(imgui_click, "full displaced + browser frame")
+  assert_true(imgui_click._st.draw_calls > 10, "DrawList executed card/LED/knob draw calls")
+  assert_true(imgui_click._st.opened_popups["reapch_fx_browser_popup"] ~= nil, "fx browser OpenPopup triggered")
+  assert_eq(imgui_click._st.opened_popups["reapch_fx_browser_popup"].child_depth, 0, "OpenPopup called at top-level child_depth 0")
+  assert_eq(imgui_click._st.began_popups["reapch_fx_browser_popup"].child_depth, 0, "BeginPopup called at matching child_depth 0")
+
+  -- 15.3 BeginChild 返回 false（折叠/裁剪）时绝不误调 EndChild，也不穿透渲染
+  local imgui_collapsed = make_strict_imgui({ collapse_body = true })
+  ui.draw("ctx", imgui_collapsed, vm1, { follow_host_theme = false }, function() end)
+  assert_stacks_zero(imgui_collapsed, "collapsed BeginChild frame")
+
+  -- 15.4 轨道切换时自动清理 MIX 旋钮临时拖拽状态，防止跨轨脏态残留
+  ui._wet_edit_start["stale_row"] = 0.42
+  local tr2 = r.mock_add_track("Empty Track 2")
+  local vm2 = core.build_view_model(tr2)
+  local imgui_tr2 = make_strict_imgui()
+  ui.draw("ctx", imgui_tr2, vm2, { follow_host_theme = false }, function() end)
+  assert_stacks_zero(imgui_tr2, "switched track uninitialized strip frame")
+  assert_eq(ui._wet_edit_start["stale_row"], nil, "switching track clears stale MIX knob drag state")
+
+  -- 15.5 无选中轨道帧渲染栈平衡
+  local vm_nil = core.build_view_model(nil)
+  local imgui_nil = make_strict_imgui()
+  ui.draw("ctx", imgui_nil, vm_nil, { follow_host_theme = false }, function() end)
+  assert_stacks_zero(imgui_nil, "no selected track frame")
 end)
 
 --------------------------------------------------------------------------------

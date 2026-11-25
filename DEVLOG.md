@@ -1,11 +1,25 @@
 # DEVLOG.md
 
-- **当前版本**：`v0.2.0`（完整操作闭环 + Studio Dark / 宿主自适应视觉体系 + 单行 MIX 圆弧旋钮；遵循全局版本号锁死规则，未正式打 Tag / Release 前保持 `v0.2.0` 版本号不变）
+- **当前版本**：`v0.2.0`（含 `v0.2.1` UI 调试与质感精修迭代：完整操作闭环 + Studio Dark / 浅色粉红等宿主 HSL 自适应视觉体系 + 单行 MIX 圆弧旋钮与像素级防溢出卡片；遵循全局版本号锁死规则，未正式打 Tag / Release 前 `core.VERSION` 保持 `0.2.0` 不变）
 - **项目简称**：`ReaPCh`（Reaper ProChannel）
 - **前置环境**：
   - `docs/imgui.lua`：已确认，本机 ReaImGui 动态垫片（`reaper_imgui-x64` `v0.10.0.5`），支持 `require 'imgui' '0.10'`（向下兼容 `'0.9'`）；垫片在加载时已对 `flags & 1 ~= 0` 的枚举常量预求值，且遵循 ReaImGui 0.9/0.10 规范仅在 `ImGui.Begin` / `ImGui.BeginChild` 返回 `visible == true` 时调用 `ImGui.End` / `ImGui.EndChild`。
-  - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；`v0.2.0` 现已扩展至 **14 组**边界单元测试用例（新增 `EnumInstalledFX` 枚举缓存与搜索、单行 Wet/Dry 原生参数读写、双区双向排序、**Synth 乐器插件识别与默认过滤**、**`reaper-fxfolders.ini` / `reaper-fxtags.ini` 解析与多维分组 + 脚本内自定义分组持久化**、**上下双区跨区互相拖拽移入/移出与 0 号位容器保护**、**`src/theme.lua` 颜色打包/解包与 `GetThemeColor` 转换、WCAG 2.1 对比度兜底、浅色/深色宿主主题自适应及 ImGui 样式栈压弹平衡**）。
-  - **Git 远程仓库核验记录**：当前本地仓库尚未绑定远程仓库 URL（`git remote -v` 为空），暂无法执行 `git push`；所有提交均规范保存在本地 `feat/v0.2.0-core-loop` 分支。
+  - `tests/run.lua`：`v0.1.0` 7 组边界测试已在 REAPER 7 宿主内置 Lua 5.4 环境中实机验证全部 PASS；现已扩展至 **15 组**边界与 UI 集成单元测试用例（新增用例 14b 白/浅灰+樱花粉宿主 HSL 色相保持与第三方位图占位黑容错，以及用例 15 严格 `docs/imgui.lua` 元表下 `ui.draw` 全流程栈平衡、顶层 Popup ID 作用域一致性、UTF-8 中文字符边界安全截断与跨轨旋钮状态清理）。
+  - **Git 仓库状态**：当前在 `feat/v0.2.0-core-loop` 分支开发提交（已关联 `origin/feat/v0.2.0-core-loop`），未获用户验收与明确指令前不合并 `main`、不执行 `git push`。
+
+## 已完成（`v0.2.1` UI 调试、缺陷修复与质感精修）
+- **`src/theme.lua`（HSL 宿主彩色点缀承接、浅色主题清爽层次与完整 ImGui 控件染色）**：
+  - **纯 Lua RGB ↔ HSL 色相保持算法（`theme.rgb_to_hsl` / `hsl_to_rgb` / `adapt_vivid_accent`）**：在多组 REAPER 主题高亮键（`col_tcp_bgsel`、`col_seltrack2`、`col_seltrack`、`col_main_hilite`、`selitem_dot` 等）中优先捕获有效彩色点缀（如浅色白灰皮肤的樱花粉/玫瑰粉，要求 RGB 通道差 `>= 14` 且非灰白黑），仅沿 HSL 亮度轴调整至满足对比度门槛，彻底杜绝浅色粉红在混合兜底时变脏发灰或回退硬编码冷蓝的问题；同时当宿主色相落入暖琥珀区（`20°..52°`）时自动错开 0 号位 Strip 强调色以保证双区一眼可辨。
+  - **第三方 PNG 位图浅色皮肤占位黑容错**：当 `col_main_bg2` 为极暗占位黑（`L < 0.02`）而 `col_tcp_bg` 与 `col_main_editbk` 均为明亮浅色（`L > 0.45`）时，自动采用 `col_tcp_bg` 判定为 `host_light`，避免误判为纯黑皮肤。
+  - **完整 ImGui 原生控件配色栈补齐 + 签名缓存**：补全 `Col_Scrollbar*`、`Col_Tab*`（通过 `rawget` 同时兼容 ReaImGui 0.10 `Col_TabSelected`/`Col_TabDimmed` 与 0.9 `Col_TabActive`/`Col_TabUnfocused`）、`Col_TextSelectedBg`、`Col_ResizeGrip*`、`Col_DockingPreview`、`Col_TitleBgCollapsed` 等，消除浅色皮肤下残留的 Dear ImGui 默认黑灰/亮蓝滚动条与 Dock 标签页违和感；新增主题色签名缓存（`theme.clear_host_cache()`），兼顾零每帧 GC 与换肤即时响应。
+- **`src/ui.lua` & `src/main.lua`（实机级布局修复、防溢出截断、交互手感与 Split Dock 兼容）**：
+  - **彻底消除单行 FX 卡片 `Selectable` 脏框与长插件名/百分比溢出**：将单行 FX 卡片升级为精确 4 段式像素对齐布局（左侧 3px 色条 + 18px Bypass LED + 弹性插件名热区 + 动态宽度 MIX 旋钮 + 20px 硬件风格 `×` 移除钮），新增按 UTF-8 字符边界安全截断的 `fit_text_with_ellipsis` 与 `DrawList_PushClipRect/PopClipRect` 双重防溢出，彻底解决长插件名覆盖旋钮、`"100%"` 撞击 `×` 按钮及中文截断乱码问题；插件名悬停自动显示完整名称与状态 Tooltip，右键菜单打开时抑制悬停 Tooltip 防遮挡。
+  - **固定吸顶轨道栏 + 透明滚动体 + 顶层 Popup 作用域修复**：顶部 `TRK` 轨道栏固定吸顶且超长轨道名自动截断（绝不挤出右上角 `⚙` 按钮）；下方双区置于无边框透明 `BeginChild("##reapch_body_scroll", 0, 0)` 中流畅滚动，完整保留 REAPER / ReaImGui 原生 Split Dock；通过 `ui._pending_open_fx_browser` 在顶层主窗口 ID 栈统一调用 `OpenPopup`，彻底避免 `BeginChild` 子作用域导致点击 `+ 添加` 打不开弹窗的 Bug，并修正 `AlwaysAutoResize` 弹窗内 `BeginChild` 固定对齐宽度 `390px` 与激活分组按钮强调色高亮。
+  - **双区标题栏与偏离提示卡片精修**：消除原标题栏 `Selectable` 丑框与窄窗按钮重叠，将 0 号位整区总 Bypass 升级为紧凑硬件胶囊开关（`ON` / `OFF`），将 MCP 偏离提示条升级为带 `warning_bg` / `warning_border` 的卡片；全行 4 段均挂载 `attach_zone_drop_target` 实现整行无死角拖放，拖拽期间底部追加条自动高亮为清晰 Drop Zone，轨道切换自动清理 `_wet_*` 旋钮拖拽缓存；规避 Dear ImGui 1.91 `SetCursorPosY` 越界断言。
+  - **MIX 圆弧旋钮手感增强**：新增悬停/拖拽外环高亮、拖拽态 `MouseCursor_ResizeNS` 上下调节光标与右对齐百分比读数，保留上下拖拽实时调参不刷 Undo、`Shift` 4 倍微调、松手沿用 `pre_undo_wet_0_to_1` 基线一步 Undo、双击重置 `100%`。
+  - **`src/main.lua`**：将 `ConfigFlags_DockingEnable` 改为 `rawget` 探测，统一全项目防 `__index` 抛错规范。
+- **`tests/run.lua`（扩展至 15 组单元测试）**：
+  - 扩充用例 14（HSL 往返精度、浅灰白+极浅樱花粉皮肤自适应与对比度校验、第三方位图占位黑容错），新增用例 15（严格复刻 `docs/imgui.lua` `__index` 抛错元表的 `ui.draw` 全路径集成回归测试，验证零未探测字段访问、全样式/ID/ClipRect/窗口栈归零平衡、`BeginChild` 折叠态安全、顶层 Popup 作用域一致、UTF-8 中文字符边界截断与跨轨旋钮状态清理）。
 
 ## 已完成（`v0.2.0` 核心逻辑与朴素操作闭环 + 实机反馈增强）
 - **`src/core.lua`（纯逻辑层扩展，零 ImGui 依赖）**：
@@ -47,8 +61,8 @@
    - 不强制默认内置；作为低优先级可选方案（Opt-in），仅在用户显式开启时按需调用 REAPER 原厂自带的 `JS: Volume Adjustment` 联动 dB 参数。
 
 ## 下一步
-1. 在 REAPER 7 内运行 `tests/run.lua` 验收全部 14 组单元测试，并在 `src/main.lua` 中实机体验：
-   - 默认 Studio Dark 主题与右上角 `⚙ -> 跟随 REAPER 宿主主题配色 (实验性)` 在明亮白/浅灰底浅色主题下的自适应卡片与文字对比度效果；
-   - 单行 MIX 圆弧旋钮（上下拖拽、`Shift` 微调、双击重置 `100%`、松手 `Ctrl+Z` 一步退回、悬停 Tooltip）；
-   - 双区卡片层级、Bypass 指示灯与跨区/区内拖拽高亮插入线反馈。
-2. 待用户绑定远程仓库 URL 后执行 `git push`，或推进 `v0.3.0` 0 号位 Channel Strip 预设保存与加载体系。
+1. 在 REAPER 7 内运行 `tests/run.lua` 实机验收全部 **15 组**单元测试，并在 `src/main.lua` 中实机检验：
+   - 浅色白/浅灰 + 粉红自定义皮肤下开启右上角 `⚙ -> 跟随 REAPER 宿主主题配色 (实验性)` 的玫瑰粉强调色承接、卡片描边层次、滚动条/Dock 标签协调度与文字对比度；
+   - 默认 Studio Dark 主题与 Split Dock 窄窗（如 220px~280px）下的固定吸顶轨道栏、UTF-8 长名截断、硬件胶囊总 Bypass (`ON`/`OFF`)、单行 MIX 圆弧旋钮与整行无死角跨区拖拽反馈；
+   - 点击双区 `+ 添加` 弹窗（含分组高亮、搜索对齐与 `390px` 列表稳态）。
+2. 待用户验收 `v0.2.1` UI 精修并明确下令后再决定是否合并/推送或推进 `v0.3.0` 0 号位 Channel Strip 预设保存与加载体系。

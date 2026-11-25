@@ -54,7 +54,7 @@ local core = require("core")
 local ui = require("ui")
 
 -- 3. 创建支持停靠 (Docking) 的 ReaImGui 上下文
-local docking_flag = ImGui.ConfigFlags_DockingEnable
+local docking_flag = rawget(ImGui, "ConfigFlags_DockingEnable")
 if type(docking_flag) == "function" then
   docking_flag = docking_flag()
 end
